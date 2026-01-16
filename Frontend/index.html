@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Glossary - Ultimate Stability</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+      :root { --header-height: 64px; }
+      body, html { height: 100%; overflow: hidden; margin: 0; padding: 0; background-color: #f0f2f5; font-family: system-ui, -apple-system, sans-serif; }
+      
+      .sidebar-header, .content-header { 
+        height: var(--header-height); 
+        min-height: var(--header-height);
+        display: flex;
+        align-items: center;
+        border-bottom: 1px solid #e9ecef;
+        background-color: white;
+      }
+
+      .custom-card { 
+        border-radius: 16px; 
+        height: 100%; 
+        overflow: hidden; 
+        background-color: #ffffff;
+        display: flex;
+        flex-direction: column;
+        border: none;
+      }
+
+      .scroll-container::-webkit-scrollbar { width: 4px; }
+      .scroll-container::-webkit-scrollbar-track { background: transparent; }
+      .scroll-container::-webkit-scrollbar-thumb { background: #ced4da; border-radius: 10px; }
+      
+      .header-action-area { width: 48px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+      .flip-card { background-color: transparent; width: 420px; height: 320px; perspective: 1000px; cursor: pointer; flex-shrink: 0; }
+      .flip-card-inner { position: relative; width: 100%; height: 100%; text-align: center; transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1); transform-style: preserve-3d; }
+      .flip-card.flipped .flip-card-inner { transform: rotateY(180deg); }
+      .flip-card-front, .flip-card-back { position: absolute; width: 100%; height: 100%; -webkit-backface-visibility: hidden; backface-visibility: hidden; border-radius: 24px !important; box-shadow: 0 10px 30px rgba(0,0,0,0.05); border: 1px solid #f0f0f0; }
+      .flip-card-back { background-color: white; transform: rotateY(180deg); }
+
+      /* 动画优化：应用到包裹容器 */
+      @keyframes slideInRight {
+        from { opacity: 0; transform: translateX(30px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+      @keyframes slideInLeft {
+        from { opacity: 0; transform: translateX(-30px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+      .slide-right { animation: slideInRight 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
+      .slide-left { animation: slideInLeft 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
+      
+      .fade-in { animation: fadeIn 0.3s ease-out; }
+      @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+      
+      #root { height: 100%; }
+      .app-container { height: 100vh; width: 100vw; padding: 1.5rem; display: flex; flex-direction: column; }
+      
+      #sidebar-container { height: 100%; width: 340px; flex-shrink: 0; }
+      .sidebar-layer { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+      
+      .list-group-item.active-word { background-color: #f8f9fa !important; border-left: 4px solid #0d6efd !important; }
+
+      /* 导航按钮样式，确保位置固定 */
+      .nav-btn {
+        width: 48px;
+        height: 48px;
+        border: 1px solid #eee;
+        background: white;
+        transition: all 0.2s ease;
+        z-index: 5;
+      }
+      .nav-btn:hover { background: #f8f9fa; transform: scale(1.05); }
+    </style>
+<script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0"
+  }
+}
+</script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="module">
+      import { GoogleGenAI } from "@google/genai";
+
+      const state = {
+        view: 'upload', 
+        fileData: null,
+        words: [],
+        wordData: {},
+        favorites: new Set(),
+        viewSnapshot: [], 
+        isProcessing: false,
+        selectedWord: null,
+        collectionIndex: 0,
+        isFlipped: false,
+        currentAnim: 'slide-right'
+      };
+
+      // --- HTML Snippets ---
+      const getDetailHtmlSnippet = (word) => {
+        const data = state.wordData[word];
+        return `
+          <div class="p-4 fade-in">
+            <div class="mb-4">
+              <label class="text-uppercase text-secondary fw-bold small mb-2 d-block" style="letter-spacing: 1px; font-size: 0.65rem">Definition</label>
+              <p class="text-dark small lh-lg mb-0">${data?.meaning || "No definition available."}</p>
+            </div>
+            <div>
+              <label class="text-uppercase text-secondary fw-bold small mb-2 d-block" style="letter-spacing: 1px; font-size: 0.65rem">Example</label>
+              <div class="p-3 bg-light rounded-3 border-start border-4 border-primary-subtle">
+                <p class="text-muted small fst-italic mb-0">"${data?.example || "No example available."}"</p>
+              </div>
+            </div>
+          </div>`;
+      };
+
+      // 仅返回卡片内容的 HTML
+      const getCardContentOnly = (word) => {
+        return `
+          <div class="flip-card ${state.isFlipped ? 'flipped' : ''}" onclick="window.toggleFlip()">
+            <div class="flip-card-inner">
+              <div class="flip-card-front card d-flex flex-column justify-content-center align-items-center p-4">
+                <div class="position-absolute top-0 end-0 p-3">
+                  <i class="bi ${state.favorites.has(word) ? 'bi-star-fill text-warning' : 'bi-star text-secondary-subtle'} fs-4" 
+                     data-fav-icon="${word}" onclick="event.stopPropagation(); window.handleToggleFav(event, '${word}')"></i>
+                </div>
+                <h1 class="display-5 fw-bold text-dark text-center px-3 text-break">${word}</h1>
+              </div>
+              <div class="flip-card-back card d-flex flex-column p-4 text-start">
+                <h4 class="fw-bold mb-3 border-bottom pb-2 text-primary text-truncate">${word}</h4>
+                <div class="overflow-auto scroll-container pe-2">${getDetailHtmlSnippet(word)}</div>
+              </div>
+            </div>
+          </div>`;
+      };
+
+      // --- Interaction Handlers ---
+
+      const updateFlashcardUI = () => {
+        const wrapper = document.getElementById('flashcard-wrapper');
+        if (!wrapper || state.viewSnapshot.length === 0) return;
+        
+        const currentWord = state.viewSnapshot[state.collectionIndex];
+        // 移除旧动画类并强制重绘
+        wrapper.className = 'mx-3';
+        void wrapper.offsetWidth; 
+        wrapper.className = `mx-3 ${state.currentAnim}`;
+        wrapper.innerHTML = getCardContentOnly(currentWord);
+
+        // 更新侧边栏高亮
+        document.querySelectorAll('.list-group-item').forEach(el => el.classList.remove('active-word'));
+        const activeItem = document.querySelector(`[data-word-item="${currentWord}"]`);
+        if (activeItem) activeItem.classList.add('active-word');
+      };
+
+      window.handleWordClick = (word) => {
+        state.selectedWord = word;
+        if (state.view === 'collections') {
+          const oldIndex = state.collectionIndex;
+          state.collectionIndex = state.viewSnapshot.indexOf(word);
+          state.currentAnim = state.collectionIndex >= oldIndex ? 'slide-right' : 'slide-left';
+          state.isFlipped = false;
+          updateFlashcardUI();
+        } else {
+          const listLayer = document.getElementById('list-layer');
+          const detailLayer = document.getElementById('detail-layer');
+          const detailTitle = document.getElementById('detail-title');
+          const detailBody = document.getElementById('detail-body');
+          const detailFav = document.getElementById('detail-fav-icon');
+
+          if (listLayer && detailLayer) {
+            listLayer.classList.add('d-none');
+            detailLayer.classList.remove('d-none');
+            detailTitle.innerText = word;
+            detailBody.innerHTML = getDetailHtmlSnippet(word);
+            detailFav.setAttribute('onclick', `window.handleToggleFav(event, '${word}')`);
+            detailFav.setAttribute('data-fav-icon', word);
+            const isFav = state.favorites.has(word);
+            detailFav.className = `bi ${isFav ? 'bi-star-fill text-warning' : 'bi-star text-secondary-subtle'} fs-5`;
+          }
+        }
+      };
+
+      window.closeDetail = () => {
+        state.selectedWord = null;
+        const listLayer = document.getElementById('list-layer');
+        const detailLayer = document.getElementById('detail-layer');
+        if (listLayer && detailLayer) {
+          listLayer.classList.remove('d-none');
+          detailLayer.classList.add('d-none');
+        }
+      };
+
+      window.handleToggleFav = (e, word) => {
+        e.stopPropagation();
+        const isAdding = !state.favorites.has(word);
+        if (isAdding) state.favorites.add(word); else state.favorites.delete(word);
+
+        const icons = document.querySelectorAll(`[data-fav-icon="${word}"]`);
+        icons.forEach(icon => {
+          const isBig = icon.classList.contains('fs-4') || icon.classList.contains('fs-5');
+          const sizeClass = isBig ? (icon.classList.contains('fs-4') ? 'fs-4' : 'fs-5') : '';
+          icon.className = `bi ${isAdding ? 'bi-star-fill text-warning' : 'bi-star text-secondary-subtle'} ${sizeClass}`;
+        });
+
+        if (state.view === 'collections') {
+          const titleCount = document.getElementById('deck-title-count');
+          if (titleCount) titleCount.innerText = `Study Deck (${state.favorites.size})`;
+        }
+      };
+
+      window.setView = (view) => {
+        state.view = view;
+        state.selectedWord = null;
+        if (view === 'collections') {
+          state.viewSnapshot = Array.from(state.favorites);
+          state.collectionIndex = 0;
+          state.isFlipped = false;
+          state.currentAnim = 'fade-in';
+        }
+        render();
+      };
+
+      window.goHome = () => {
+        if (state.fileData?.url) URL.revokeObjectURL(state.fileData.url);
+        state.view = 'upload';
+        state.fileData = null;
+        state.selectedWord = null;
+        state.words = [];
+        state.wordData = {};
+        render();
+      };
+
+      window.nextCard = () => {
+        if (state.viewSnapshot.length <= 1) return;
+        state.collectionIndex = (state.collectionIndex + 1) % state.viewSnapshot.length;
+        state.isFlipped = false;
+        state.currentAnim = 'slide-right';
+        updateFlashcardUI();
+      };
+
+      window.prevCard = () => {
+        if (state.viewSnapshot.length <= 1) return;
+        state.collectionIndex = (state.collectionIndex - 1 + state.viewSnapshot.length) % state.viewSnapshot.length;
+        state.isFlipped = false;
+        state.currentAnim = 'slide-left';
+        updateFlashcardUI();
+      };
+
+      window.toggleFlip = () => {
+        state.isFlipped = !state.isFlipped;
+        const card = document.querySelector('.flip-card');
+        if (card) card.classList.toggle('flipped', state.isFlipped);
+      };
+
+      // --- Main Render Logic ---
+
+      const render = () => {
+        const root = document.getElementById('root');
+        if (!root) return;
+
+        if (state.view === 'upload') {
+          root.innerHTML = `
+            <div class="h-100 d-flex flex-column justify-content-center align-items-center fade-in">
+              <input type="file" id="mainFileInput" class="d-none" accept="application/pdf" onchange="window.handleMainUpload(event)">
+              <div class="position-relative" style="width: 300px; height: 300px;">
+                <div onclick="document.getElementById('mainFileInput').click()" class="position-absolute top-50 start-50 translate-middle bg-white border border-secondary-subtle rounded-3 shadow-sm d-flex flex-column justify-content-center align-items-center" style="width: 140px; height: 160px; cursor: pointer; z-index: 10">
+                  <div class="rounded-circle bg-light d-flex align-items-center justify-content-center mb-2" style="width: 50px; height: 50px"><i class="bi bi-plus fs-2 text-secondary"></i></div>
+                  <span class="fw-medium text-secondary" style="font-size: 13px">Upload PDF</span>
+                </div>
+                <div class="w-100 h-100 border border-2 border-dashed border-secondary-subtle rounded-circle opacity-25"></div>
+              </div>
+              <button onclick="window.setView('collections')" class="btn btn-outline-dark rounded-pill px-5 py-2 mt-5 text-uppercase fw-bold shadow-sm" style="font-size: 12px; letter-spacing: 2px">Collections</button>
+            </div>`;
+        } else {
+          const isColl = state.view === 'collections';
+          const list = isColl ? state.viewSnapshot : state.words;
+          
+          root.innerHTML = `
+            <div class="app-container">
+              <div class="row h-100 g-4 flex-nowrap">
+                <div class="col-auto d-flex flex-column align-items-center pt-2">
+                  <button onclick="window.goHome()" class="btn btn-outline-secondary rounded-circle mb-4 d-flex align-items-center justify-content-center shadow-sm" style="width: 48px; height: 48px"><i class="bi bi-house-door-fill"></i></button>
+                </div>
+                <div class="col d-flex flex-column" style="min-width: 0">
+                  <div class="custom-card shadow-sm ${isColl ? 'bg-light-subtle' : ''}">
+                    <div class="content-header bg-white px-3 justify-content-center">
+                      <i class="bi ${isColl ? 'bi-bookmarks-fill text-primary' : 'bi-file-earmark-pdf text-danger'} me-2"></i>
+                      <span class="small fw-bold text-dark text-truncate" id="${isColl ? 'deck-title-count' : ''}">
+                        ${isColl ? `Study Deck (${state.favorites.size})` : state.fileData?.name}
+                      </span>
+                    </div>
+                    <div class="flex-grow-1 d-flex align-items-center justify-content-center p-3 overflow-hidden" id="deck-container">
+                      ${isColl ? `
+                        <div class="d-flex align-items-center justify-content-center w-100" style="max-width: 850px">
+                          ${state.viewSnapshot.length > 0 ? `
+                            <button onclick="window.prevCard()" class="btn nav-btn shadow-sm rounded-circle d-flex align-items-center justify-content-center"><i class="bi bi-chevron-left"></i></button>
+                            <div id="flashcard-wrapper" class="mx-3 ${state.currentAnim}">
+                              ${getCardContentOnly(state.viewSnapshot[state.collectionIndex])}
+                            </div>
+                            <button onclick="window.nextCard()" class="btn nav-btn shadow-sm rounded-circle d-flex align-items-center justify-content-center"><i class="bi bi-chevron-right"></i></button>
+                          ` : `
+                            <div class="text-center p-5 bg-white rounded-4 shadow-sm fade-in" style="max-width: 400px">
+                              <div class="rounded-circle bg-light d-inline-flex align-items-center justify-content-center mb-4" style="width: 80px; height: 80px"><i class="bi bi-bookmarks text-secondary fs-1"></i></div>
+                              <h4 class="fw-bold">No Collections</h4>
+                              <button onclick="window.goHome()" class="btn btn-dark rounded-pill px-4 mt-3">Go Home</button>
+                            </div>
+                          `}
+                        </div>
+                      ` : `<iframe src="${state.fileData?.url}" class="w-100 h-100 border-0"></iframe>`}
+                    </div>
+                  </div>
+                </div>
+                <div id="sidebar-container">
+                  <div class="custom-card shadow-sm h-100 position-relative">
+                    <div id="list-layer" class="sidebar-layer">
+                      <div class="sidebar-header px-3">
+                        <div class="header-action-area">
+                          <button onclick="window.triggerUploadJson()" class="btn btn-sm btn-outline-secondary border-0 rounded-circle p-0" style="width: 32px; height: 32px"><i class="bi bi-upload"></i></button>
+                        </div>
+                        <div class="flex-grow-1 text-center overflow-hidden">
+                          <span class="fw-bold text-dark text-truncate d-block small">${isColl ? 'Collections' : 'Keywords'}</span>
+                        </div>
+                        <div class="header-action-area">
+                          <button onclick="window.downloadJson()" class="btn btn-sm btn-outline-secondary border-0 rounded-circle p-0" style="width: 32px; height: 32px"><i class="bi bi-download"></i></button>
+                        </div>
+                      </div>
+                      <div class="flex-grow-1 overflow-y-auto scroll-container bg-white">
+                        <div class="list-group list-group-flush">
+                          ${list.map((word, idx) => `
+                            <div class="list-group-item list-group-item-action border-0 px-4 py-3 d-flex justify-content-between align-items-center ${isColl && idx === state.collectionIndex ? 'active-word' : ''}" 
+                                 onclick="window.handleWordClick('${word}')" data-word-item="${word}" style="cursor: pointer">
+                              <span class="small fw-medium text-dark">${word}</span>
+                              <i class="bi ${state.favorites.has(word) ? 'bi-star-fill text-warning' : 'bi-star text-secondary-subtle'}" 
+                                 data-fav-icon="${word}" onclick="window.handleToggleFav(event, '${word}')"></i>
+                            </div>
+                          `).join('')}
+                          ${list.length === 0 ? '<p class="p-4 text-center text-muted small">No items.</p>' : ''}
+                        </div>
+                      </div>
+                      ${!isColl ? `<div class="p-3 border-top bg-light-subtle">
+                        <button onclick="window.handleAiExtract()" class="btn btn-sm btn-primary w-100 rounded-pill py-2 fw-bold" id="ai-extract-btn">
+                          <i class="bi bi-stars me-1"></i> AI Extract
+                        </button>
+                      </div>` : ''}
+                    </div>
+                    <div id="detail-layer" class="sidebar-layer d-none">
+                      <div class="sidebar-header px-3">
+                        <div class="header-action-area">
+                          <button onclick="window.closeDetail()" class="btn btn-sm btn-light rounded-circle p-0" style="width: 32px; height: 32px"><i class="bi bi-arrow-left"></i></button>
+                        </div>
+                        <div class="flex-grow-1 text-center overflow-hidden">
+                          <span class="fw-bold text-dark text-truncate d-block small" id="detail-title"></span>
+                        </div>
+                        <div class="header-action-area">
+                          <i class="bi bi-star text-secondary-subtle fs-5" style="cursor:pointer" id="detail-fav-icon"></i>
+                        </div>
+                      </div>
+                      <div class="flex-grow-1 overflow-y-auto scroll-container bg-white" id="detail-body"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>`;
+        }
+      };
+
+      // --- Mock AI Service ---
+      const analyzePdfContent = async (fileName) => {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        return {
+          words: ["Architecture", "Scalability", "Microservices", "Kubernetes", "DevOps"],
+          wordData: {
+            "Architecture": { meaning: "The conceptual structure of a system.", example: "Modern architecture is key to long-term success." },
+            "Scalability": { meaning: "Ability of a system to grow with demand.", example: "Cloud providers offer horizontal scalability." },
+            "Microservices": { meaning: "Software architecture style structured as a collection of services.", example: "Netflix's move to microservices improved uptime." },
+            "Kubernetes": { meaning: "An open-source container orchestration system.", example: "K8s is the industry standard for container management." },
+            "DevOps": { meaning: "Practices combining software development and IT operations.", example: "DevOps practices accelerate release cycles." }
+          }
+        };
+      };
+
+      window.triggerUploadJson = () => {
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = '.json';
+        inp.onchange = (e) => {
+          const file = e.target.files[0]; if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              const json = JSON.parse(ev.target?.result);
+              if (json.words && json.wordData) {
+                state.words = json.words;
+                state.wordData = { ...state.wordData, ...json.wordData };
+                if (state.view === 'collections') {
+                  json.words.forEach(w => state.favorites.add(w));
+                  state.viewSnapshot = Array.from(state.favorites);
+                }
+                render();
+              }
+            } catch (err) { alert("Invalid file."); }
+          };
+          reader.readAsText(file);
+        };
+        inp.click();
+      };
+
+      window.downloadJson = () => {
+        const data = { words: (state.view === 'collections' ? Array.from(state.favorites) : state.words), wordData: state.wordData };
+        if (data.words.length === 0) return alert("Nothing to export.");
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = `glossary.json`; a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      window.handleAiExtract = async () => {
+        if (state.isProcessing || !state.fileData) return;
+        state.isProcessing = true;
+        const btn = document.getElementById('ai-extract-btn');
+        if (btn) btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Processing...';
+        try {
+          const result = await analyzePdfContent(state.fileData.name);
+          state.words = result.words;
+          state.wordData = { ...state.wordData, ...result.wordData };
+          render();
+        } finally { state.isProcessing = false; }
+      };
+
+      window.handleMainUpload = (e) => {
+        const file = e.target.files[0];
+        if (file?.type === 'application/pdf') {
+          state.fileData = { name: file.name, url: URL.createObjectURL(file) };
+          state.words = [];
+          state.view = 'content';
+          render();
+        }
+      };
+
+      render();
+    </script>
+</body>
+</html>
