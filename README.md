@@ -1,353 +1,358 @@
 # article-reading-helper
 
-An online article reading helper that turns **PDF articles into study-ready word lists**.  
-It supports both **manual word lists** and an **AI model that automatically picks difficult words**.
+An online article-reading helper that turns a PDF into:
 
-> 原始目标：给学生一篇英文文章，自动抽取“可能不认识的单词”，生成带释义和例句的生词本，并且可以以后接到网页 / App 上使用。
+- clean text
+- an AI-selected vocabulary list
+- meanings (Merriam-Webster) + example sentences (Cambridge)
+- JSON that can be consumed by a website or app
+
+The idea:  
+A student picks an article → the system extracts the text → an AI model guesses which words are hard → dictionary APIs/web-scrapers fetch meanings & examples → the result is saved as CSV + JSON for the reading app.
 
 ---
 
-## 1. 项目结构 (Project Layout)
+## 1. Main Features
+
+- **PDF → TXT**
+  - Extract raw text from a PDF file.
+- **Vocabulary builder (classic mode)**
+  - Given:
+    - an article (`.txt`)
+    - a user word list (`.txt`)
+  - Build:
+    - a list of matched words in the article
+    - a CSV with meaning + example
+    - an optional JSON file for front-end use.
+- **AI word selection**
+  - Train a BERT-style keyword model on the **midas/inspec (extraction)** dataset.
+  - Use the model to automatically pick “likely difficult” words from an article.
+- **One-shot pipeline from PDF**
+  - `PDF → TXT → AI wordlist → CSV → JSON`
+  - Everything saved into a folder named `reading_{article_name}`.
+
+---
+
+## 2. Repository Layout
+
+Typical layout (your repo may look like this):
 
 ```text
 article-reading-helper/
-├── data/                         # 你的 PDF / 文章数据放这里（示例：Xuanzang-page 1-5.pdf）
-├── extract_pdf_text.py           # PDF → TXT 的小工具（原始版本）
-├── csv_to_json.py                # 把 CSV 词表转成 JSON
-├── build_vocab_combined.py       # 传统模式：用“给定单词表”+ 文章生成词汇表
-├── train_keyword_model.py        # 训练 AI 关键词抽取模型（Inspec 数据集）
-├── keyword_extractor.py          # 用训练好的模型对文本做关键词抽取
-├── candidate_builder.py          # 从文章构造候选单词 + 频率统计、过滤规则
-├── ai_select_wordlist.py         # 用 AI + 规则，给整篇文章选出生词表
-├── text_utils.py                 # 文本清洗、分句等工具函数
-├── llm_refiner.py                # （可选）以后可以接大模型进一步 refine 结果
-├── pipeline_from_pdf.py          # 从 PDF 一键到：txt + 词表 CSV + JSON（支持 AI / 手动两种模式）
-├── keyword-bert-inspec/         # 训练好后的模型目录（训练脚本会自动创建）
+├── ai_select_wordlist.py        # AI-based word selection (from article text)
+├── build_vocab_combined.py      # Build vocab CSV from article + word list
+├── candidate_builder.py         # Build candidate words (frequency / filters)
+├── config.py                    # Central configuration (paths, API keys, etc.)
+├── csv_to_json.py               # Convert vocab CSV → JSON for front-end
+├── data/                        # Put your PDFs and sample data here
+├── extract_pdf_text.py          # PDF → TXT helper
+├── keyword_extractor.py         # Low-level keyword extraction functions
+├── keyword-bert-inspec/         # Trained keyword model folder (output)
 │   ├── config.json
 │   ├── model.safetensors
-│   ├── vocab.txt
 │   ├── tokenizer.json
-│   └── tokenizer_config.json
-└── README.md                     # 本说明文件
+│   ├── tokenizer_config.json
+│   └── vocab.txt
+├── llm_refiner.py               # (Optional) LLM-based fallback refiner
+├── pipeline_from_pdf.py         # Full pipeline script (PDF → JSON)
+├── text_utils.py                # Text cleaning / tokenization helpers
+└── train_keyword_model.py       # Train the keyword model (once)
 ```
 
 ---
 
-## 2. 环境准备 (Environment)
+## 3. Installation
 
-建议使用 Conda 创建独立环境（Python 3.10）：
+### 3.1. Python environment
+
+Recommended:
+
+- Python 3.9+  
+- Conda or virtualenv
+
+Example with `conda`:
 
 ```bash
 conda create -n article-helper python=3.10
 conda activate article-helper
 ```
 
-安装依赖（示例）：
+### 3.2. Dependencies
+
+Install the main libraries (you can adjust as needed):
 
 ```bash
-pip install torch transformers datasets seqeval requests beautifulsoup4 pandas
+pip install torch transformers datasets seqeval requests beautifulsoup4 lxml PyPDF2
 ```
 
-> 你实验室服务器里的环境已经能成功跑 `train_keyword_model.py` 和 `pipeline_from_pdf.py`，本地只要装好 **同一版本的 `transformers/torch` 和相关依赖** 就能直接加载模型使用。
+If you do not care about training metrics (F1), you can skip `seqeval`.
 
 ---
 
-## 3. 原始功能：PDF → TXT + 手动单词表模式
+## 4. Training the Keyword Model (once)
 
-### 3.1 PDF 转 TXT
+You usually run this once on a powerful server, then copy the trained model folder to your laptop.
 
-脚本：`extract_pdf_text.py`  
-用途：把 PDF 转成纯文本，便于后续处理。
+Script: `train_keyword_model.py`
 
-示例：
+High-level:
 
-```bash
-python extract_pdf_text.py --input data/your_article.pdf --output your_article.txt
-```
+- Uses `distilbert-base-cased` (or similar) from Hugging Face.
+- Trains a token classification model (BIO tags) on `midas/inspec` (`"extraction"` config).
+- Saves the best model to `./keyword-bert-inspec`.
 
-- `--input`：PDF 文件路径  
-- `--output`：输出的 txt 文件名
+### 4.1. Run training
 
----
-
-### 3.2 传统模式：用给定单词表生成词汇表
-
-脚本：`build_vocab_combined.py`  
-用途：用“文章 txt + 自己准备的单词表 txt”生成词汇 CSV 和 words.txt
-
-- **释义**：来自 *Merriam-Webster*  
-- **例句**：来自 *Cambridge Dictionary*
-
-示例命令：
-
-```bash
-python build_vocab_combined.py \
-  --article your_article.txt \
-  --select  your_word_list.txt \
-  --out_words words.txt \
-  --out_csv   words.csv
-```
-
-参数说明：
-
-- `--article`：文章的 txt 文件（比如刚从 PDF 转出来的）
-- `--select`：你自己准备的生词候选表（每行一个单词）
-- `--out_words`：输出：文章里真正出现过的目标词列表（txt）
-- `--out_csv`：输出：带释义和例句的词汇表（CSV）
-
----
-
-## 4. 新功能：AI 关键词模型（自动选词）
-
-### 4.1 训练 AI 模型（DistilBERT + Token Classification）
-
-脚本：`train_keyword_model.py`  
-用途：在 Hugging Face `midas/inspec` 的 **关键词抽取数据集** 上训练一个小模型，用来对任意英文句子 / 段落打 BIO 标签并抽取关键词短语。
-
-运行一次训练：
+From the project root:
 
 ```bash
 python train_keyword_model.py
 ```
 
-你会在终端看到类似日志：
+What it does:
 
-- 加载 tokenizer 和 Inspec 数据集  
-- 训练若干 epoch（默认 5）  
-- 在验证集上选最好的模型  
-- 在 `./keyword-bert-inspec/` 目录下保存模型和 tokenizer
-
-训练完成后，会生成：
+1. Downloads the Inspec extraction dataset.
+2. Downloads the base transformer model.
+3. Trains for several epochs (defaults are in the script: `EPOCHS`, `BATCH_SIZE`, `LR`, etc.).
+4. Saves the best validation loss model into:
 
 ```text
-keyword-bert-inspec/
-  ├── config.json
-  ├── model.safetensors
-  ├── vocab.txt
-  ├── tokenizer.json
-  └── tokenizer_config.json
+./keyword-bert-inspec/
+    config.json
+    model.safetensors
+    tokenizer.json
+    tokenizer_config.json
+    vocab.txt
 ```
 
-> **在服务器上训练 → 本地使用：**
-> - 在服务器上跑完 `train_keyword_model.py`
-> - 把整个 `keyword-bert-inspec/` 文件夹拷贝到你本地项目里  
-> - 本地环境中只需要安装 `torch + transformers` 等依赖，就可以直接加载并用来抽关键词，无需重新训练。
+You should see logs like:
+
+- `===== Epoch 1/5 =====`
+- `Train loss: ...`
+- `Val loss: ...`
+- `Test metrics: {...}`
+- `Training finished, best model saved to ./keyword-bert-inspec`
+
+### 4.2. Using the trained model on another machine
+
+To run the AI pipeline on your own laptop:
+
+1. Copy the entire `keyword-bert-inspec/` folder from the server to your local repo root (same level as `pipeline_from_pdf.py`).
+2. On your laptop, install the Python dependencies.
+3. Run the pipeline (see section 5).  
+   The code will automatically load `./keyword-bert-inspec` if it exists.
+
+As long as the relative path stays the same, you can freely move between machines.
 
 ---
 
-### 4.2 AI 选词核心逻辑（简要说明）
+## 5. One-Shot Pipeline: PDF → TXT + AI Wordlist + CSV + JSON
 
-相关脚本：
+Script: `pipeline_from_pdf.py`
 
-- `keyword_extractor.py`  
-  - 封装了 `extract_keywords_from_sentence()` / `extract_keywords_from_text()`  
-  - 内部调用 DistilBERT 关键词模型，对句子 / 段落做 BIO 标注，合并成关键词短语。
+General form:
 
-- `candidate_builder.py`  
-  - 从整篇文章中统计词频、过滤过短/过长、过滤全大写缩写等  
-  - 可以按频率排序，选出候选词列表。
+```bash
+python pipeline_from_pdf.py   --mode {ai|list}   --pdf path/to/your_file.pdf   [--select wordlist.txt]   [--ai_top_n VALUE]
+```
 
-- `ai_select_wordlist.py`  
-  - 把 **模型打分** + **频率信息** + **一些规则（过滤专有名词、奇怪符号等）** 结合起来  
-  - 得到一份适合“生词本”的候选词表  
-  - 支持：
-    - `ai_top_n` 为整数：取前 N 个关键词  
-    - `ai_top_n` 为 0–1 小数：按文章中不同词的数量的百分比取词（例如 0.1 = 10%）
+All outputs are placed in a folder named:
 
----
+```text
+reading_{PDF_STEM}/
+```
 
-## 5. 一键流水线：从 PDF 直接到 词汇 JSON/CSV
+where `PDF_STEM` is the PDF filename without extension (and with some simple cleaning of spaces and special characters).
 
-脚本：`pipeline_from_pdf.py`  
-用途：**从一个 PDF 文件直接跑完整套流程**：
+Example:  
+`data/Xuanzang-page 1-5.pdf` → `reading_Xuanzang-page_1-5/`
 
-- 提取 PDF 文本 → `.txt`
-- AI 或 手动模式选词 → `.select.txt` / `.ai.select.txt`
-- 调用 `build_vocab_combined.py` 查询词典 → `.csv`
-- 再把 CSV 转成 JSON → `.json`
-- 所有结果都按 **文章名** 放进一个独立文件夹，方便前端 / App 使用
+### 5.1. Output files (AI mode)
 
-### 5.1 输出目录结构示例
-
-以 `data/Xuanzang-page 1-5.pdf` 为例，脚本会生成：
+In AI mode, you typically get:
 
 ```text
 reading_Xuanzang-page_1-5/
-  ├── Xuanzang-page_1-5.txt           # 从 PDF 提取的全文 txt
-  ├── Xuanzang-page_1-5.ai.select.txt # AI 挑选出的生词列表（原始候选）
-  ├── Xuanzang-page_1-5.ai.words.txt  # 出现在文章中的目标词列表
-  ├── Xuanzang-page_1-5.ai.csv        # 含释义 & 例句的词汇表（给 Excel 用）
-  └── Xuanzang-page_1-5.ai.json       # 同样内容的 JSON（给网页 / App 直接用）
+├── Xuanzang-page_1-5.txt              # extracted article text
+├── Xuanzang-page_1-5.ai.select.txt    # AI-selected raw word list (one per line)
+├── Xuanzang-page_1-5.ai.words.txt     # words actually found in the article
+├── Xuanzang-page_1-5.ai.csv           # word, meaning, example (for spreadsheet)
+└── Xuanzang-page_1-5.ai.json          # same info, JSON (for web/app)
 ```
 
-> 以后前端只要读取这个 `reading_XXX` 文件夹下面的 `.json`，就能给学生展示“本篇文章的生词本”。
+The pipeline steps:
+
+1. **Step 1 – Extract text from PDF**
+
+   Uses `extract_pdf_text.py` internally:
+
+   - Reads every page.
+   - Writes a cleaned `.txt` file into the reading folder.
+
+2. **Step 2 – AI select words**
+
+   Uses:
+
+   - `keyword_extractor.py` and the trained model (`keyword-bert-inspec`)
+   - `candidate_builder.py` for candidate filtering (stopwords, frequency, casing)
+   - Internal filtering rules to drop:
+     - words with apostrophes (for example `"xuanzang's"`)
+     - tokens that contain two or more hyphens (for example `character--whether`)
+   - It may also skip some very rare or broken tokens with mostly non-alphabetic characters.
+
+3. **Step 3 – Build vocab CSV**
+
+   Uses `build_vocab_combined.py` logic to:
+
+   - Check if each candidate word appears in the article text.
+   - Query Merriam-Webster for a meaning.
+   - Query Cambridge Dictionary for an example sentence.
+   - If Merriam-Webster fails but a meaning is found via a fallback lookup, that fallback is used.
+   - If no standard dictionary definition is found, the word is still kept with a short note such as  
+     `"No standard dictionary definition found; see example for context."`  
+     This is useful for proper nouns or technical terms.
+   - Writes a CSV file.
+
+4. **Step 4 – Convert CSV → JSON**
+
+   Uses `csv_to_json.py`:
+
+   - Reads the CSV from step 3.
+   - Writes a JSON file with an array of objects:
+     ```json
+     {
+       "word": "monk",
+       "meaning": "a man who is a member of a religious order and lives in a monastery",
+       "example": "..."
+     }
+     ```
+   - This JSON is what you will typically load in your web or mobile app.
+
+### 5.2. Controlling how many words AI selects (`--ai_top_n`)
+
+The flag `--ai_top_n` controls how many AI-ranked words are kept.
+
+You can pass either:
+
+- Integer K: “keep the top K words”
+
+  ```bash
+  # keep at most 30 words
+  python pipeline_from_pdf.py     --mode ai     --pdf data/Xuanzang-page_1-5.pdf     --ai_top_n 30
+  ```
+
+- Float between 0 and 1: “keep this percentage of content words”
+
+  ```bash
+  # keep top 10% of content words
+  python pipeline_from_pdf.py     --mode ai     --pdf data/Xuanzang-page_1-5.pdf     --ai_top_n 0.10
+  ```
+
+Internally the script:
+
+1. Collects candidate “content words” after filtering stopwords and junk.
+2. Sorts them by model score.
+3. If `ai_top_n >= 1`, it keeps the first `int(ai_top_n)` words.  
+   If `0 < ai_top_n < 1`, it keeps approximately that fraction of candidates (rounded).
 
 ---
 
-## 6. 使用方式详解
+## 6. Classic Mode: Use Your Own Word List
 
-### 6.1 模式一：AI 自动选词（推荐）
+If you already have a custom word list (for example `20241226.txt`) and just want to match words in an article and build a CSV/JSON, you can use list mode.
 
-适合：  
-- 没有现成单词表  
-- 想让 AI 根据文章内容自动猜哪些词比较难
+### 6.1. `extract_pdf_text.py` (PDF → TXT)
 
-命令示例：
+Simple helper:
 
 ```bash
-python pipeline_from_pdf.py \
-  --mode ai \
-  --pdf "data/Xuanzang-page 1-5.pdf" \
-  --ai_top_n 0.1
+python extract_pdf_text.py --input path/to/article.pdf --output article.txt
 ```
 
-参数说明：
+This creates `article.txt`.
 
-- `--mode ai`：使用 AI 选词模式  
-- `--pdf`：PDF 文件路径  
-- `--ai_top_n`：
-  - 如果是 **整数**（例如 `30`）：取前 30 个关键词
-  - 如果是 **小数**（0–1，如 `0.1`）：按“文章中不同单词的数量 × 0.1”来取，等于“抽取 10% 的生词”
+### 6.2. `build_vocab_combined.py` (article + word list → vocab CSV)
 
-例如：
+Purpose:  
+Use a given word list to scan the article and build a vocabulary list with dictionary information.
+
+Command:
 
 ```bash
-# 取前 40 个关键词
-python pipeline_from_pdf.py --mode ai --pdf "data/xxx.pdf" --ai_top_n 40
-
-# 按 15% 比例取词
-python pipeline_from_pdf.py --mode ai --pdf "data/xxx.pdf" --ai_top_n 0.15
+python build_vocab_combined.py   --article article.txt   --select your_word_list.txt   --out_words words.txt   --out_csv words.csv
 ```
 
-运行完成后，你会看到终端类似输出：
+- `article` – text file of the article
+- `select` – list of target words (one per line)
+- `out_words` – subset of `select` that actually appears in the article
+- `out_csv` – vocabulary CSV with meaning and example
 
-- [Step 1] 从 PDF 提取文本  
-- [Step 2] 用 AI 生成生词表（显示抽取了多少个词）  
-- [Step 3] 构建词汇表 CSV（逐个单词显示是否查到释义 / 例句）  
-- [Step 4] 转成 JSON  
-- 最后提示：所有文件都在 `reading_文章名` 文件夹中
+### 6.3. `csv_to_json.py` (CSV → JSON)
 
----
-
-### 6.2 模式二：使用自己准备的单词表
-
-适合：
-
-- 教师 / 学生已经有一份“重点单词表（比如考试范围）”
-- 只想在文章里筛选“这篇文章真正出现过的单词”
-
-命令示例：
+Once you have `words.csv`:
 
 ```bash
-python pipeline_from_pdf.py \
-  --mode list \
-  --pdf "data/YourArticle.pdf" \
-  --select "data/your_word_list.txt"
+python csv_to_json.py words.csv words.json
 ```
 
-- `--mode list`：表示“列表模式”（不用 AI 选词）  
-- `--select`：你自己的单词列表（每行一个词）
+This produces `words.json` which your website or app can load.
 
-输出类似：
+### 6.4. One-shot from PDF with your word list
+
+You can also use `pipeline_from_pdf.py` in list mode to avoid multiple manual steps:
+
+```bash
+python pipeline_from_pdf.py   --mode list   --pdf data/Xuanzang-page_1-5.pdf   --select my_word_list.txt
+```
+
+Output will again be under:
 
 ```text
-reading_YourArticle/
-  ├── YourArticle.txt            # PDF 提取出来的文本
-  ├── YourArticle.list.words.txt # 在文章中真正出现过的目标词列表
-  ├── YourArticle.list.csv       # 词汇表 CSV
-  └── YourArticle.list.json      # 词汇表 JSON
+reading_Xuanzang-page_1-5/
+    Xuanzang-page_1-5.txt
+    Xuanzang-page_1-5.list.words.txt
+    Xuanzang-page_1-5.list.csv
+    Xuanzang-page_1-5.list.json
 ```
 
 ---
 
-## 7. CSV & JSON 字段说明
+## 7. Notes and Limitations
 
-无论是 AI 模式还是手动模式，最终的 CSV/JSON 都有三个核心字段：
-
-- `word` / `﻿word`：目标词
-- `meaning`：英文释义（来自 Merriam-Webster，如可用）
-- `example`：英文例句（来自 Cambridge，如可用；否则会退回到文章中的原句）
-
-示例 JSON（缩写）：
-
-```json
-[
-  {
-    "word": "auspicious",
-    "meaning": "showing or suggesting that future success is likely : propitious",
-    "example": "They won their first match of the season 5–1 which was an auspicious start/beginning."
-  },
-  {
-    "word": "disposition",
-    "meaning": "the usual attitude or mood of a person or animal",
-    "example": "She is of a nervous/cheerful/sunny disposition."
-  }
-]
-```
-
-前端 / App 可以直接用这个 JSON 来展示生词卡片。
+- Dictionary lookups rely on the current HTML from Merriam-Webster and Cambridge.
+  - If they change their page structure, scraping logic may need to be updated.
+- Some very rare words, transliterations, or technical religious terms may not exist in standard dictionaries.
+  - In those cases, the pipeline keeps the word and uses:
+    - the example sentence from the article itself, and/or
+    - a short fallback message instead of a standard definition.
+- `ai_top_n` is heuristic.
+  - For academic or historical texts with many proper nouns, you may want to:
+    - use a smaller percentage (for example 0.05 → 5%), or
+    - combine AI selection with a hand-curated word list.
 
 ---
 
-## 8. 在服务器训练，在本地使用模型的流程总结
+## 8. Typical Workflow Summary
 
-1. **在实验室服务器上：**
+1. Train the model once (on a server):
 
    ```bash
-   # 激活环境
-   conda activate article-helper
-
-   # 进入项目目录
-   cd article-reading-helper
-
-   # 训练一次模型
    python train_keyword_model.py
+   # outputs ./keyword-bert-inspec/
    ```
 
-   训练完成后会生成 `keyword-bert-inspec/` 目录。
+2. Copy `keyword-bert-inspec/` to your local repo (if needed).
 
-2. **把模型复制到本地电脑：**
-
-   - 用 `scp`、SFTP、WinSCP 等工具，把整个 `keyword-bert-inspec/` 文件夹下载到你本地项目目录中。
-
-3. **在本地电脑上：**
+3. For each new article PDF:
 
    ```bash
-   conda create -n article-helper python=3.10
-   conda activate article-helper
-   pip install torch transformers datasets requests beautifulsoup4 pandas seqeval
+   python pipeline_from_pdf.py      --mode ai      --pdf data/SomeArticle.pdf      --ai_top_n 0.10
    ```
 
-   然后就可以直接在本地跑：
+4. Load `reading_SomeArticle/SomeArticle.ai.json` in your web or mobile app and display:
 
-   ```bash
-   python pipeline_from_pdf.py \
-     --mode ai \
-     --pdf "data/YourArticle.pdf" \
-     --ai_top_n 0.1
-   ```
+   - word
+   - meaning
+   - example
 
-   本地并不会再训练，只是 **加载现成的模型** 来选词。
-
----
-
-## 9. 未来扩展 (Future Work Ideas)
-
-- 根据学生水平（如 CEFR / TOEFL 词频）动态调节“生词难度阈值”
-- 在前端让学生点“我会 / 我不会”，回写一个“个人词库”，下次自动跳过会的词
-- 接上更大的多模态模型，支持“图文混合”的阅读材料
-- 增加中文释义 / 双语例句（接入其他词典 API）
-
----
-
-如果你只想快速开始：
-
-1. 把 PDF 放到 `data/` 里  
-2. （可选）在服务器上先跑 `python train_keyword_model.py` 训练一次  
-3. 之后直接：
-
-```bash
-python pipeline_from_pdf.py --mode ai --pdf "data/YourArticle.pdf" --ai_top_n 0.1
-```
-
-拿到 `reading_YourArticle/YourArticle.ai.json`，就可以连到网页 / App 了 🎯
+Students can click a word in the article and see the definition and example directly on the side.
