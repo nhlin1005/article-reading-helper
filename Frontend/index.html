@@ -8,14 +8,31 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
       :root { --header-height: 64px; }
-      body, html { height: 100%; overflow: hidden; margin: 0; padding: 0; background-color: #f0f2f5; font-family: system-ui, -apple-system, sans-serif; }
+      body, html { height: 100%; overflow: hidden; margin: 0; padding: 0; background-color: #ffffff; font-family: system-ui, -apple-system, sans-serif; }
       
+      .upload-logo {
+      position: absolute;
+      top: 50%;
+      width: 120px;              /* logo 大小，可以自己调 */
+      }
+
+      .upload-logo-left {
+      left: -120px;              /* 负值 = 稍微突出到圆外面 */
+      transform: translateY(-50%);
+      }
+
+      .upload-logo-right {
+      right: -120px;
+      transform: translateY(-50%) scaleX(-1);
+      }
+
+
       .sidebar-header, .content-header { 
         height: var(--header-height); 
         min-height: var(--header-height);
         display: flex;
         align-items: center;
-        border-bottom: 1px solid #e9ecef;
+        border-bottom: 1px solid #f0f2f5;
         background-color: white;
       }
 
@@ -271,12 +288,31 @@
             <div class="h-100 d-flex flex-column justify-content-center align-items-center fade-in">
               <input type="file" id="mainFileInput" class="d-none" accept="application/pdf" onchange="window.handleMainUpload(event)">
               <div class="position-relative" style="width: 300px; height: 300px;">
+                <input type="file" id="mainFileInput" class="d-none" accept="application/pdf" onchange="window.handleMainUpload(event)">
                 <div onclick="document.getElementById('mainFileInput').click()" class="position-absolute top-50 start-50 translate-middle bg-white border border-secondary-subtle rounded-3 shadow-sm d-flex flex-column justify-content-center align-items-center" style="width: 140px; height: 160px; cursor: pointer; z-index: 10">
-                  <div class="rounded-circle bg-light d-flex align-items-center justify-content-center mb-2" style="width: 50px; height: 50px"><i class="bi bi-plus fs-2 text-secondary"></i></div>
-                  <span class="fw-medium text-secondary" style="font-size: 13px">Upload PDF</span>
+                <div class="rounded-circle d-flex align-items-center justify-content-center mb-2"
+                style="width: 50px; height: 50px; background-color: #38961D;">
+                <i class="bi bi-plus fs-2 text-white"></i>
                 </div>
-                <div class="w-100 h-100 border border-2 border-dashed border-secondary-subtle rounded-circle opacity-25"></div>
-              </div>
+                <span class="fw-medium text-secondary" style="font-size: 13px">Upload PDF</span>
+                </div>
+
+            <div
+              class="w-100 h-100 border border-dashed rounded-circle"
+              style="border-color: #FFD700; background-color: #38961D; border-width: 10px;">
+            </div>
+
+            <!-- 左侧斯巴达 logo -->
+            <img src="spartan-logo.png"
+              alt="MSU Spartan"
+              class="upload-logo upload-logo-left">
+
+            <!-- 右侧斯巴达 logo -->
+            <img src="spartan-logo.png"
+              alt="MSU Spartan"
+              class="upload-logo upload-logo-right">
+            </div>
+
               <button onclick="window.setView('collections')" class="btn btn-outline-dark rounded-pill px-5 py-2 mt-5 text-uppercase fw-bold shadow-sm" style="font-size: 12px; letter-spacing: 2px">Collections</button>
             </div>`;
         } else {
