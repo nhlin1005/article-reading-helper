@@ -11,21 +11,18 @@
       body, html { height: 100%; overflow: hidden; margin: 0; padding: 0; background-color: #ffffff; font-family: system-ui, -apple-system, sans-serif; }
       
       .upload-logo {
-      position: absolute;
-      top: 50%;
-      width: 120px;              /* logo 大小，可以自己调 */
+        position: absolute;
+        top: 50%;
+        width: 120px;
       }
-
       .upload-logo-left {
-      left: -120px;              /* 负值 = 稍微突出到圆外面 */
-      transform: translateY(-50%);
+        left: -120px;
+        transform: translateY(-50%);
       }
-
       .upload-logo-right {
-      right: -120px;
-      transform: translateY(-50%) scaleX(-1);
+        right: -120px;
+        transform: translateY(-50%) scaleX(-1);
       }
-
 
       .sidebar-header, .content-header { 
         height: var(--header-height); 
@@ -58,7 +55,6 @@
       .flip-card-front, .flip-card-back { position: absolute; width: 100%; height: 100%; -webkit-backface-visibility: hidden; backface-visibility: hidden; border-radius: 24px !important; box-shadow: 0 10px 30px rgba(0,0,0,0.05); border: 1px solid #f0f0f0; }
       .flip-card-back { background-color: white; transform: rotateY(180deg); }
 
-      /* 动画优化：应用到包裹容器 */
       @keyframes slideInRight {
         from { opacity: 0; transform: translateX(30px); }
         to { opacity: 1; transform: translateX(0); }
@@ -81,7 +77,6 @@
       
       .list-group-item.active-word { background-color: #f8f9fa !important; border-left: 4px solid #0d6efd !important; }
 
-      /* 导航按钮样式，确保位置固定 */
       .nav-btn {
         width: 48px;
         height: 48px;
@@ -92,13 +87,13 @@
       }
       .nav-btn:hover { background: #f8f9fa; transform: scale(1.05); }
     </style>
-<script type="importmap">
-{
-  "imports": {
-    "@google/genai": "https://esm.sh/@google/genai@^1.37.0"
-  }
-}
-</script>
+    <script type="importmap">
+    {
+      "imports": {
+        "@google/genai": "https://esm.sh/@google/genai@^1.37.0"
+      }
+    }
+    </script>
 </head>
 <body>
     <div id="root"></div>
@@ -138,7 +133,6 @@
           </div>`;
       };
 
-      // 仅返回卡片内容的 HTML
       const getCardContentOnly = (word) => {
         return `
           <div class="flip-card ${state.isFlipped ? 'flipped' : ''}" onclick="window.toggleFlip()">
@@ -165,13 +159,11 @@
         if (!wrapper || state.viewSnapshot.length === 0) return;
         
         const currentWord = state.viewSnapshot[state.collectionIndex];
-        // 移除旧动画类并强制重绘
         wrapper.className = 'mx-3';
         void wrapper.offsetWidth; 
         wrapper.className = `mx-3 ${state.currentAnim}`;
         wrapper.innerHTML = getCardContentOnly(currentWord);
 
-        // 更新侧边栏高亮
         document.querySelectorAll('.list-group-item').forEach(el => el.classList.remove('active-word'));
         const activeItem = document.querySelector(`[data-word-item="${currentWord}"]`);
         if (activeItem) activeItem.classList.add('active-word');
@@ -277,6 +269,61 @@
         if (card) card.classList.toggle('flipped', state.isFlipped);
       };
 
+      // === NEW: allow user to manually add a word ===
+      window.handleAddWord = () => {
+        // 1) word itself
+        const rawWord = prompt("Enter the word you want to add:");
+        if (rawWord === null) return;  // user cancelled
+        const word = rawWord.trim();
+        if (!word) return;
+
+        // avoid duplicates
+        const allWordsSet = new Set([
+          ...state.words,
+          ...Array.from(state.favorites),
+          ...state.viewSnapshot
+        ]);
+        if (allWordsSet.has(word)) {
+          alert("This word already exists in your list.");
+          return;
+        }
+
+        // 2) optional meaning
+        const rawMeaning = prompt("Optional: meaning/definition (you can leave this blank)");
+        const meaning = rawMeaning ? rawMeaning.trim() : "";
+
+        // 3) optional example
+        const rawExample = prompt("Optional: example sentence (you can leave this blank)");
+        const example = rawExample ? rawExample.trim() : "";
+
+        // write into wordData
+        if (!state.wordData[word]) {
+          state.wordData[word] = {
+            meaning,
+            example
+          };
+        }
+
+        // always add to main words list (for current article)
+        if (!state.words.includes(word)) {
+          state.words.push(word);
+        }
+
+        // if currently viewing collections, also add to favorites & snapshot
+        if (state.view === 'collections') {
+          state.favorites.add(word);
+          state.viewSnapshot = Array.from(state.favorites);
+        }
+
+        // re-render UI
+        render();
+
+        // auto-open detail for the new word (in sidebar)
+        setTimeout(() => {
+          window.handleWordClick(word);
+        }, 0);
+      };
+
       // --- Main Render Logic ---
 
       const render = () => {
@@ -290,28 +337,26 @@
               <div class="position-relative" style="width: 300px; height: 300px;">
                 <input type="file" id="mainFileInput" class="d-none" accept="application/pdf" onchange="window.handleMainUpload(event)">
                 <div onclick="document.getElementById('mainFileInput').click()" class="position-absolute top-50 start-50 translate-middle bg-white border border-secondary-subtle rounded-3 shadow-sm d-flex flex-column justify-content-center align-items-center" style="width: 140px; height: 160px; cursor: pointer; z-index: 10">
-                <div class="rounded-circle d-flex align-items-center justify-content-center mb-2"
-                style="width: 50px; height: 50px; background-color: #38961D;">
-                <i class="bi bi-plus fs-2 text-white"></i>
+                  <div class="rounded-circle d-flex align-items-center justify-content-center mb-2"
+                    style="width: 50px; height: 50px; background-color: #38961D;">
+                    <i class="bi bi-plus fs-2 text-white"></i>
+                  </div>
+                  <span class="fw-medium text-secondary" style="font-size: 13px">Upload PDF</span>
                 </div>
-                <span class="fw-medium text-secondary" style="font-size: 13px">Upload PDF</span>
+
+                <div
+                  class="w-100 h-100 border border-dashed rounded-circle"
+                  style="border-color: #FFD700; background-color: #38961D; border-width: 10px;">
                 </div>
 
-            <div
-              class="w-100 h-100 border border-dashed rounded-circle"
-              style="border-color: #FFD700; background-color: #38961D; border-width: 10px;">
-            </div>
+                <img src="spartan-logo.png"
+                  alt="MSU Spartan"
+                  class="upload-logo upload-logo-left">
 
-            <!-- 左侧斯巴达 logo -->
-            <img src="spartan-logo.png"
-              alt="MSU Spartan"
-              class="upload-logo upload-logo-left">
-
-            <!-- 右侧斯巴达 logo -->
-            <img src="spartan-logo.png"
-              alt="MSU Spartan"
-              class="upload-logo upload-logo-right">
-            </div>
+                <img src="spartan-logo.png"
+                  alt="MSU Spartan"
+                  class="upload-logo upload-logo-right">
+              </div>
 
               <button onclick="window.setView('collections')" class="btn btn-outline-dark rounded-pill px-5 py-2 mt-5 text-uppercase fw-bold shadow-sm" style="font-size: 12px; letter-spacing: 2px">Collections</button>
             </div>`;
@@ -359,13 +404,23 @@
                     <div id="list-layer" class="sidebar-layer">
                       <div class="sidebar-header px-3">
                         <div class="header-action-area">
-                          <button onclick="window.triggerUploadJson()" class="btn btn-sm btn-outline-secondary border-0 rounded-circle p-0" style="width: 32px; height: 32px"><i class="bi bi-upload"></i></button>
+                          <button onclick="window.triggerUploadJson()" class="btn btn-sm btn-outline-secondary border-0 rounded-circle p-0" style="width: 32px; height: 32px" title="Import JSON">
+                            <i class="bi bi-upload"></i>
+                          </button>
                         </div>
                         <div class="flex-grow-1 text-center overflow-hidden">
                           <span class="fw-bold text-dark text-truncate d-block small">${isColl ? 'Collections' : 'Keywords'}</span>
                         </div>
                         <div class="header-action-area">
-                          <button onclick="window.downloadJson()" class="btn btn-sm btn-outline-secondary border-0 rounded-circle p-0" style="width: 32px; height: 32px"><i class="bi bi-download"></i></button>
+                          <!-- NEW: Add Word button -->
+                          <button onclick="window.handleAddWord()" class="btn btn-sm btn-outline-secondary border-0 rounded-circle p-0" style="width: 32px; height: 32px" title="Add word">
+                            <i class="bi bi-plus-lg"></i>
+                          </button>
+                        </div>
+                        <div class="header-action-area">
+                          <button onclick="window.downloadJson()" class="btn btn-sm btn-outline-secondary border-0 rounded-circle p-0" style="width: 32px; height: 32px" title="Export JSON">
+                            <i class="bi bi-download"></i>
+                          </button>
                         </div>
                       </div>
                       <div class="flex-grow-1 overflow-y-auto scroll-container bg-white">
@@ -449,36 +504,86 @@
       };
 
       window.downloadJson = () => {
-        const data = { words: (state.view === 'collections' ? Array.from(state.favorites) : state.words), wordData: state.wordData };
+        const data = { 
+          words: (state.view === 'collections' ? Array.from(state.favorites) : state.words), 
+          wordData: state.wordData 
+        };
         if (data.words.length === 0) return alert("Nothing to export.");
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = `glossary.json`; a.click();
+        const a = document.createElement('a'); 
+        a.href = url; 
+        a.download = `glossary.json`; 
+        a.click();
         URL.revokeObjectURL(url);
       };
 
       window.handleAiExtract = async () => {
-        if (state.isProcessing || !state.fileData) return;
-        state.isProcessing = true;
-        const btn = document.getElementById('ai-extract-btn');
-        if (btn) btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Processing...';
-        try {
-          const result = await analyzePdfContent(state.fileData.name);
-          state.words = result.words;
-          state.wordData = { ...state.wordData, ...result.wordData };
-          render();
-        } finally { state.isProcessing = false; }
+      // 没有正在处理 + 有上传的 pdf 文件 才继续
+      if (state.isProcessing || !state.fileData?.file) {
+        alert("Please upload a PDF first.");
+        return;
+      }
+
+      state.isProcessing = true;
+      const btn = document.getElementById('ai-extract-btn');
+      if (btn) {
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Processing...';
+      btn.disabled = true;
+      }
+
+      try {
+        const formData = new FormData();
+        formData.append("pdf", state.fileData.file);
+
+        const resp = await fetch("/api/extract_keywords", {
+          method: "POST",
+          body: formData,
+        });
+
+      if (!resp.ok) {
+        console.error("Server error", resp.status);
+        alert("Backend error when extracting vocabulary.");
+        return;
+      }
+
+      const data = await resp.json();
+      // data = { words: [...], wordData: {...} }
+      state.words = data.words || [];
+      state.wordData = {
+        ...state.wordData,
+        ...(data.wordData || {})
       };
 
+      render();
+      } catch (err) {
+      console.error(err);
+      alert("Failed to call backend. Check if server.py is running.");
+      } finally {
+      state.isProcessing = false;
+      const btn2 = document.getElementById('ai-extract-btn');
+      if (btn2) {
+        btn2.innerHTML = '<i class="bi bi-stars me-1"></i> AI Extract';
+        btn2.disabled = false;
+      }
+    }
+  };
+
+
       window.handleMainUpload = (e) => {
-        const file = e.target.files[0];
-        if (file?.type === 'application/pdf') {
-          state.fileData = { name: file.name, url: URL.createObjectURL(file) };
-          state.words = [];
-          state.view = 'content';
-          render();
-        }
+      const file = e.target.files[0];
+      if (file?.type === 'application/pdf') {
+      state.fileData = { 
+        name: file.name, 
+        url: URL.createObjectURL(file),
+        file: file          // <--- 关键：保存原始 File 对象
+        };
+      state.words = [];
+      state.view = 'content';
+      render();
+      }
       };
+
 
       render();
     </script>
