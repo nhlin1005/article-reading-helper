@@ -1,118 +1,116 @@
-import os
+# server.py
+# -*- coding: utf-8 -*-
+
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+from pathlib import Path
 import sys
 import json
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS   # 新增
+import os
 
+# ---------- Paths ----------
+BASE_DIR = Path(__file__).resolve().parent          # project root
+FRONTEND_DIR = BASE_DIR / "Frontend"                # index.html, index.js
+AIMODE_DIR = BASE_DIR / "aimode"                    # all backend NLP code
+DATA_DIR = AIMODE_DIR / "data"                      # where uploaded PDFs go
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# ------------- 路径设置：把 article-reading-helper 加到 Python 搜索路径 -------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HELPER_DIR = os.path.join(BASE_DIR, "article-reading-helper")
-sys.path.append(HELPER_DIR)
+# Let Python import modules inside aimode/ by bare name:
+#   from pipeline_from_pdf import run_ai_mode
+sys.path.insert(0, str(AIMODE_DIR))
 
-# 从你的 pipeline_from_pdf.py 里导入 run_ai_mode
-from pipeline_from_pdf import run_ai_mode   # 如果函数名不同，请对照文件改这里
+from pipeline_from_pdf import run_ai_mode           # uses ai_select_wordlist, build_vocab, etc.
 
-# ------------- Flask 初始化，顺便当静态服务器用（直接跑前端） -------------
+# ---------- Flask app ----------
 app = Flask(
     __name__,
-    static_folder=BASE_DIR,      # 把整个根目录当静态文件目录
-    static_url_path=""           # 这样 /index.html、/spartan-logo.png 都能直接访问
+    static_folder=str(FRONTEND_DIR),
+    static_url_path=""
 )
 
+CORS(app) 
 
-CORS(app)
 
-# 首页：返回 index.html
+# ---------- Routes ----------
 @app.route("/")
 def index():
-    return send_from_directory(BASE_DIR, "index.html")
+    """Serve the front-end."""
+    return send_from_directory(FRONTEND_DIR, "index.html")
 
 
-# 兜底静态资源，比如 spartan-logo.png、README 等
-@app.route("/<path:path>")
-def static_proxy(path):
-    return send_from_directory(BASE_DIR, path)
-
-
-# ------------- 核心接口：接收 PDF，调用 article-reading-helper，回前端 JSON -------------
-@app.post("/api/extract_keywords")
+@app.route("/api/extract_keywords", methods=["POST"])
 def extract_keywords():
     """
-    前端传一个 pdf 文件字段名叫 'pdf'
-    -> 保存到 article-reading-helper/data/
-    -> 调 run_ai_mode(...)
-    -> 读 reading_xxx/xxx.ai.json
-    -> 返回 {words: [...], wordData: {...}} 给前端
+    API called by the front-end.
+
+    Expected form fields:
+      - pdf: the uploaded PDF file
+      - ai_top_n: optional, float/int; >=1 = number of words, 0~1 = ratio (e.g. 0.1 = 10%)
     """
     if "pdf" not in request.files:
-        return jsonify({"error": "No file field 'pdf' found"}), 400
+        return jsonify({"error": "No 'pdf' file in request"}), 400
 
     pdf_file = request.files["pdf"]
     if pdf_file.filename == "":
         return jsonify({"error": "Empty filename"}), 400
 
-    # 安全的文件名和 stem
-    original_name = pdf_file.filename
-    name_no_ext, _ = os.path.splitext(original_name)
-    safe_stem = name_no_ext.replace(" ", "_").replace("/", "_")
+    # parse ai_top_n (default 0.1 = 10% of candidates)
+    ai_top_n_str = request.form.get("ai_top_n", "0.1")
+    try:
+        ai_top_n = float(ai_top_n_str)
+    except ValueError:
+        ai_top_n = 0.1
 
-    # 保存 PDF 到 article-reading-helper/data
-    data_dir = os.path.join(HELPER_DIR, "data")
-    os.makedirs(data_dir, exist_ok=True)
-    pdf_path = os.path.join(data_dir, original_name)
+    # save uploaded PDF into aimode/data/
+    safe_name = secure_filename(pdf_file.filename)
+    pdf_path = DATA_DIR / safe_name
     pdf_file.save(pdf_path)
 
-    # 设定 reading 结果目录（和你命令行生成的一样风格）
-    reading_dir = os.path.join(HELPER_DIR, f"reading_{safe_stem}")
-    os.makedirs(reading_dir, exist_ok=True)
+    # create reading_{safe_stem} folder under project root (same logic as pipeline_from_pdf)
+    stem = pdf_path.stem
+    safe_stem = "".join(c if (c.isalnum() or c in "-_") else "_" for c in stem)
+    reading_dir = BASE_DIR / f"reading_{safe_stem}"
+    reading_dir.mkdir(parents=True, exist_ok=True)
 
-    # 调用你原来的流水线：提取文本 + 选词 + 词典 + 生成 JSON
-    # ai_top_n 自己调，可以不写让它用默认值，也可以固定 80、50 等
-    ai_top_n = 80
-    try:
-        run_ai_mode(
-            pdf_path=pdf_path,
-            reading_dir=reading_dir,
-            safe_stem=safe_stem,
-            ai_top_n=ai_top_n,
-        )
-    except TypeError:
-        # 如果你后来改了函数签名，这里可以退回最简单版本
-        # 例如：run_ai_mode(pdf_path, reading_dir, safe_stem)
-        run_ai_mode(pdf_path, reading_dir, safe_stem)
+    # run the full AI pipeline (PDF -> txt -> AI select -> CSV -> JSON + refine)
+    run_ai_mode(pdf_path, reading_dir, safe_stem, ai_top_n=ai_top_n)
 
-    # 读取生成好的 JSON，比如 reading_Xuanzang-page_1-5/Xuanzang-page_1-5.ai.json
-    json_path = os.path.join(reading_dir, f"{safe_stem}.ai.json")
-    if not os.path.exists(json_path):
-        return jsonify({"error": f"JSON vocab file not found: {json_path}"}), 500
+    # the refined JSON lives at: reading_{safe_stem}/{safe_stem}.ai.json
+    json_path = reading_dir / f"{safe_stem}.ai.json"
+    if not json_path.exists():
+        return jsonify({"error": f"Result JSON not found: {json_path}"}), 500
 
-    with open(json_path, "r", encoding="utf-8") as f:
-        vocab_list = json.load(f)
+    with json_path.open("r", encoding="utf-8") as f:
+        entries = json.load(f)
 
-    # 转成前端好用的结构：words + wordData
+    # convert list[{word, meaning, example}] -> {words: [...], wordData: {...}} for the front-end
     words = []
-    wordData = {}
-    for item in vocab_list:
-        # 处理 "﻿word" 这种带 BOM 的 key
-        w = (
-            item.get("word")
-            or item.get("\ufeffword")
-            or item.get("﻿word")  # 某些编辑器会显示成这个
-        )
+    word_data = {}
+
+    for e in entries:
+        # handle possible BOM on "word" key
+        w = e.get("word") or e.get("﻿word") or e.get("Word")
         if not w:
             continue
 
+        meaning = e.get("meaning", "")
+        example = e.get("example", "")
         words.append(w)
-        wordData[w] = {
-            "meaning": item.get("meaning", ""),
-            "example": item.get("example", ""),
+        word_data[w] = {
+            "meaning": meaning,
+            "example": example,
         }
 
-    return jsonify({"words": words, "wordData": wordData})
+    return jsonify({
+        "words": words,
+        "wordData": word_data,
+        "readingFolder": f"reading_{safe_stem}",
+        "jsonFile": json_path.name,
+    })
 
 
 if __name__ == "__main__":
-    # 在 word check\word check 目录下运行：
+    # run from project root:
     #   python server.py
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
