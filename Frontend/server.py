@@ -2,6 +2,8 @@ import os
 import sys
 import json
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS   # 新增
+
 
 # ------------- 路径设置：把 article-reading-helper 加到 Python 搜索路径 -------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +19,9 @@ app = Flask(
     static_folder=BASE_DIR,      # 把整个根目录当静态文件目录
     static_url_path=""           # 这样 /index.html、/spartan-logo.png 都能直接访问
 )
+
+
+CORS(app)
 
 # 首页：返回 index.html
 @app.route("/")
