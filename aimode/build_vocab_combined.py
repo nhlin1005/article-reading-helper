@@ -39,6 +39,35 @@ import requests
 from lxml import html
 from urllib.parse import quote
 
+
+import functools
+print = functools.partial(print, flush=True)
+
+# ----------------------------
+# Live progress for front-end polling
+# ----------------------------
+# NOTE: server.py imports this module and exposes PROGRESS at /api/progress.
+PROGRESS = {
+    "status": "idle",   # idle | running | done
+    "current": 0,
+    "total": 0,
+    "word": "",
+}
+
+
+def _set_progress(*, status: str = None, current: int = None, total: int = None, word: str = None) -> None:
+    try:
+        if status is not None:
+            PROGRESS["status"] = status
+        if current is not None:
+            PROGRESS["current"] = int(current)
+        if total is not None:
+            PROGRESS["total"] = int(total)
+        if word is not None:
+            PROGRESS["word"] = word
+    except Exception:
+        pass
+
 # ----------------------------
 # 1) Tokenization / normalization
 # ----------------------------
@@ -271,6 +300,9 @@ def build_vocab(article_path: str, select_path: str,
     ordered = [w for w in article_tokens if w in selected]
     ordered = unique_preserve_order(ordered)
 
+    # publish progress totals for frontend polling
+    _set_progress(status="running", current=0, total=len(ordered), word="")
+
     print(f"Processing {len(ordered)} words...\n")
 
     # 写 satword.txt
@@ -280,6 +312,7 @@ def build_vocab(article_path: str, select_path: str,
 
     rows = []
     for i, w in enumerate(ordered, 1):
+        _set_progress(status="running", current=i-1, total=len(ordered), word=w)
         print(f"\n[{i}/{len(ordered)}] Processing '{w}'...")
 
         # 1) Merriam-Webster 释义（带英式→美式 fallback）
@@ -322,6 +355,9 @@ def build_vocab(article_path: str, select_path: str,
         # 随机 sleep 一下，避免被网站当成机器人
         time.sleep(random.uniform(0.5, 1.5))
 
+        # mark this word as completed
+        _set_progress(status="running", current=i, total=len(ordered), word=w)
+
     # 写 CSV
     try:
         with open(out_csv, "w", newline="", encoding="utf-8-sig") as f:
@@ -329,6 +365,7 @@ def build_vocab(article_path: str, select_path: str,
             writer.writerow(["word", "meaning", "example"])
             writer.writerows(rows)
         print(f"\n✓ Success! Wrote {out_csv}")
+        _set_progress(status="done", current=len(ordered), total=len(ordered), word="")
     except PermissionError:
         ts = time.strftime("%Y%m%d_%H%M%S")
         stem, dot, ext = out_csv.partition(".")
@@ -338,6 +375,7 @@ def build_vocab(article_path: str, select_path: str,
             writer.writerow(["word", "meaning", "example"])
             writer.writerows(rows)
         print(f"WARNING: Could not write {out_csv} (file in use). Wrote {alt} instead.")
+        _set_progress(status="done", current=len(ordered), total=len(ordered), word="")
 
 
 # ----------------------------
