@@ -115,6 +115,66 @@
         currentAnim: 'slide-right'
       };
 
+
+      // --- Persistence (Favorites + Definitions) ---
+      const STORAGE_KEY = "smartGlossaryStateV1";
+
+      const loadPersistedState = () => {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (!raw) return;
+          const saved = JSON.parse(raw);
+          if (Array.isArray(saved.favorites)) {
+            state.favorites = new Set(saved.favorites);
+          }
+          if (saved.wordData && typeof saved.wordData === "object") {
+            state.wordData = saved.wordData;
+          }
+        } catch (e) {
+          console.warn("Failed to load saved state:", e);
+        }
+      };
+
+      const persistState = () => {
+        try {
+          const payload = {
+            favorites: Array.from(state.favorites),
+            wordData: state.wordData,
+          };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        } catch (e) {
+          console.warn("Failed to save state:", e);
+        }
+      };
+
+      // Try to fill meaning/example from backend on-demand
+      const ensureWordData = async (word) => {
+        const cur = state.wordData[word] || {};
+        const hasMeaning = (cur.meaning || "").trim().length > 0;
+        const hasExample = (cur.example || "").trim().length > 0;
+        if (hasMeaning && hasExample) return;
+
+        try {
+          const resp = await fetch("/api/lookup_word", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ word }),
+          });
+
+          if (!resp.ok) return;
+          const data = await resp.json().catch(() => ({}));
+          state.wordData[word] = {
+            meaning: (data.meaning || cur.meaning || "").trim(),
+            example: (data.example || cur.example || "").trim(),
+          };
+          persistState();
+        } catch (e) {
+          // ignore
+        }
+      };
+
+      loadPersistedState();
+
       // --- HTML Snippets ---
       const getDetailHtmlSnippet = (word) => {
         const data = state.wordData[word];
@@ -139,7 +199,7 @@
             <div class="flip-card-inner">
               <div class="flip-card-front card d-flex flex-column justify-content-center align-items-center p-4">
                 <div class="position-absolute top-0 end-0 p-3">
-                  <i class="bi ${state.favorites.has(word) ? 'bi-star-fill text-warning' : 'bi-star text-secondary-subtle'} fs-4" 
+                  <i class="bi ${state.favorites.has(word) ? 'bi-star-fill text-warning' : 'bi-star text-secondary-subtle'} fs-4"
                      data-fav-icon="${word}" onclick="event.stopPropagation(); window.handleToggleFav(event, '${word}')"></i>
                 </div>
                 <h1 class="display-5 fw-bold text-dark text-center px-3 text-break">${word}</h1>
@@ -157,10 +217,17 @@
       const updateFlashcardUI = () => {
         const wrapper = document.getElementById('flashcard-wrapper');
         if (!wrapper || state.viewSnapshot.length === 0) return;
-        
+
         const currentWord = state.viewSnapshot[state.collectionIndex];
+        ensureWordData(currentWord).then(() => {
+          const w2 = state.viewSnapshot[state.collectionIndex];
+          if (w2 === currentWord) {
+            const wrapper2 = document.getElementById('flashcard-wrapper');
+            if (wrapper2) wrapper2.innerHTML = getCardContentOnly(currentWord);
+          }
+        });
         wrapper.className = 'mx-3';
-        void wrapper.offsetWidth; 
+        void wrapper.offsetWidth;
         wrapper.className = `mx-3 ${state.currentAnim}`;
         wrapper.innerHTML = getCardContentOnly(currentWord);
 
@@ -169,7 +236,7 @@
         if (activeItem) activeItem.classList.add('active-word');
       };
 
-      window.handleWordClick = (word) => {
+      window.handleWordClick = async (word) => {
         state.selectedWord = word;
         if (state.view === 'collections') {
           const oldIndex = state.collectionIndex;
@@ -177,6 +244,10 @@
           state.currentAnim = state.collectionIndex >= oldIndex ? 'slide-right' : 'slide-left';
           state.isFlipped = false;
           updateFlashcardUI();
+          // If missing meaning/example, fetch and refresh the card
+          ensureWordData(word).then(() => {
+            updateFlashcardUI();
+          });
         } else {
           const listLayer = document.getElementById('list-layer');
           const detailLayer = document.getElementById('detail-layer');
@@ -188,6 +259,8 @@
             listLayer.classList.add('d-none');
             detailLayer.classList.remove('d-none');
             detailTitle.innerText = word;
+            detailBody.innerHTML = '<div class="p-4 text-muted small">Loading definition...</div>';
+            await ensureWordData(word);
             detailBody.innerHTML = getDetailHtmlSnippet(word);
             detailFav.setAttribute('onclick', `window.handleToggleFav(event, '${word}')`);
             detailFav.setAttribute('data-fav-icon', word);
@@ -223,6 +296,8 @@
           const titleCount = document.getElementById('deck-title-count');
           if (titleCount) titleCount.innerText = `Study Deck (${state.favorites.size})`;
         }
+
+        persistState();
       };
 
       window.setView = (view) => {
@@ -243,7 +318,7 @@
         state.fileData = null;
         state.selectedWord = null;
         state.words = [];
-        state.wordData = {};
+        // IMPORTANT: do NOT clear wordData/favorites. Collections should keep definitions.
         render();
       };
 
@@ -270,59 +345,49 @@
       };
 
       // === NEW: allow user to manually add a word ===
-      window.handleAddWord = () => {
-        // 1) word itself
+      window.handleAddWord = async () => {
+        // Only ask for the word. Meaning/example will be auto-filled by backend when possible.
         const rawWord = prompt("Enter the word you want to add:");
         if (rawWord === null) return;  // user cancelled
         const word = rawWord.trim();
         if (!word) return;
 
-        // avoid duplicates
-        const allWordsSet = new Set([
+        // avoid duplicates (case-insensitive)
+        const allWords = [
           ...state.words,
           ...Array.from(state.favorites),
           ...state.viewSnapshot
-        ]);
-        if (allWordsSet.has(word)) {
+        ];
+        const exists = allWords.some(w => (w || "").toLowerCase() === word.toLowerCase());
+        if (exists) {
           alert("This word already exists in your list.");
           return;
         }
 
-        // 2) optional meaning
-        const rawMeaning = prompt("Optional: meaning/definition (you can leave this blank)");
-        const meaning = rawMeaning ? rawMeaning.trim() : "";
+        // Fill meaning/example from backend if possible
+        await ensureWordData(word);
 
-        // 3) optional example
-        const rawExample = prompt("Optional: example sentence (you can leave this blank)");
-        const example = rawExample ? rawExample.trim() : "";
-
-        // write into wordData
+        // Ensure we have a record even if backend lookup is not available yet
         if (!state.wordData[word]) {
-          state.wordData[word] = {
-            meaning,
-            example
-          };
+          state.wordData[word] = { meaning: "", example: "" };
         }
 
-        // always add to main words list (for current article)
-        if (!state.words.includes(word)) {
-          state.words.push(word);
-        }
+        // Always add to current keywords list (stable alphabetical order)
+        if (!state.words.includes(word)) state.words.push(word);
+        state.words = Array.from(new Set(state.words)).sort((a, b) => a.localeCompare(b));
 
-        // if currently viewing collections, also add to favorites & snapshot
+        // If currently viewing collections, also add to favorites & snapshot
         if (state.view === 'collections') {
           state.favorites.add(word);
           state.viewSnapshot = Array.from(state.favorites);
         }
 
-        // re-render UI
+        persistState();
         render();
 
         // auto-open detail for the new word (in sidebar)
-        setTimeout(() => {
-          window.handleWordClick(word);
-        }, 0);
-      };
+        setTimeout(() => window.handleWordClick(word), 0);
+      };;
 
       // --- Main Render Logic ---
 
@@ -349,11 +414,11 @@
                   style="border-color: #FFD700; background-color: #38961D; border-width: 10px;">
                 </div>
 
-                <img src="spartan-logo.png"
+                <img src="/spartan-logo.png"
                   alt="MSU Spartan"
                   class="upload-logo upload-logo-left">
 
-                <img src="spartan-logo.png"
+                <img src="/spartan-logo.png"
                   alt="MSU Spartan"
                   class="upload-logo upload-logo-right">
               </div>
@@ -363,7 +428,7 @@
         } else {
           const isColl = state.view === 'collections';
           const list = isColl ? state.viewSnapshot : state.words;
-          
+
           root.innerHTML = `
             <div class="app-container">
               <div class="row h-100 g-4 flex-nowrap">
@@ -426,10 +491,10 @@
                       <div class="flex-grow-1 overflow-y-auto scroll-container bg-white">
                         <div class="list-group list-group-flush">
                           ${list.map((word, idx) => `
-                            <div class="list-group-item list-group-item-action border-0 px-4 py-3 d-flex justify-content-between align-items-center ${isColl && idx === state.collectionIndex ? 'active-word' : ''}" 
+                            <div class="list-group-item list-group-item-action border-0 px-4 py-3 d-flex justify-content-between align-items-center ${isColl && idx === state.collectionIndex ? 'active-word' : ''}"
                                  onclick="window.handleWordClick('${word}')" data-word-item="${word}" style="cursor: pointer">
                               <span class="small fw-medium text-dark">${word}</span>
-                              <i class="bi ${state.favorites.has(word) ? 'bi-star-fill text-warning' : 'bi-star text-secondary-subtle'}" 
+                              <i class="bi ${state.favorites.has(word) ? 'bi-star-fill text-warning' : 'bi-star text-secondary-subtle'}"
                                  data-fav-icon="${word}" onclick="window.handleToggleFav(event, '${word}')"></i>
                             </div>
                           `).join('')}
@@ -494,6 +559,7 @@
                   json.words.forEach(w => state.favorites.add(w));
                   state.viewSnapshot = Array.from(state.favorites);
                 }
+                persistState();
                 render();
               }
             } catch (err) { alert("Invalid file."); }
@@ -504,22 +570,22 @@
       };
 
       window.downloadJson = () => {
-        const data = { 
-          words: (state.view === 'collections' ? Array.from(state.favorites) : state.words), 
-          wordData: state.wordData 
+        const data = {
+          words: (state.view === 'collections' ? Array.from(state.favorites) : state.words),
+          wordData: state.wordData
         };
         if (data.words.length === 0) return alert("Nothing to export.");
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); 
-        a.href = url; 
-        a.download = `glossary.json`; 
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `glossary.json`;
         a.click();
         URL.revokeObjectURL(url);
       };
 
       window.handleAiExtract = async () => {
-      // 没有正在处理 + 有上传的 pdf 文件 才继续
+      // only continue if not processing + have uploaded pdf file
       if (state.isProcessing || !state.fileData?.file) {
         alert("Please upload a PDF first.");
         return;
@@ -527,10 +593,36 @@
 
       state.isProcessing = true;
       const btn = document.getElementById('ai-extract-btn');
+
+      // REAL progress counter from backend (/api/progress)
+      let poller = null;
+      const setBtnText = (s) => { if (btn) btn.innerHTML = s; };
       if (btn) {
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Processing...';
-      btn.disabled = true;
+        btn.disabled = true;
+        setBtnText(`<span class="spinner-border spinner-border-sm me-1"></span> Processing(0/?)`);
       }
+
+      const startPolling = () => {
+        // poll every 500ms while backend runs
+        poller = setInterval(async () => {
+          try {
+            const r = await fetch('/api/progress', { method: 'GET' });
+            if (!r.ok) return;
+            const p = await r.json().catch(() => ({}));
+            const cur = Number(p.current ?? 0) || 0;
+            const total = Number(p.total ?? 0) || 0;
+            if (total > 0) {
+              setBtnText(`<span class="spinner-border spinner-border-sm me-1"></span> Processing(${cur}/${total})`);
+            } else {
+              setBtnText(`<span class="spinner-border spinner-border-sm me-1"></span> Processing(${cur}/?)`);
+            }
+          } catch (e) {
+            // ignore
+          }
+        }, 500);
+      };
+
+      startPolling();
 
       try {
         const formData = new FormData();
@@ -541,40 +633,44 @@
           body: formData,
         });
 
-      if (!resp.ok) {
-        console.error("Server error", resp.status);
-        alert("Backend error when extracting vocabulary.");
-        return;
-      }
+        if (!resp.ok) {
+          console.error("Server error", resp.status);
+          alert("Backend error when extracting vocabulary.");
+          return;
+        }
 
-      const data = await resp.json();
-      // data = { words: [...], wordData: {...} }
-      state.words = data.words || [];
-      state.wordData = {
-        ...state.wordData,
-        ...(data.wordData || {})
-      };
+        const data = await resp.json();
+        // stable order (alphabetical)
+        const incomingWords = Array.isArray(data.words) ? data.words.slice() : [];
+        incomingWords.sort((a, b) => a.localeCompare(b));
 
-      render();
+        state.words = incomingWords;
+        state.wordData = {
+          ...state.wordData,
+          ...(data.wordData || {})
+        };
+
+        persistState();
+        render();
       } catch (err) {
-      console.error(err);
-      alert("Failed to call backend. Check if server.py is running.");
+        console.error(err);
+        alert("Failed to call backend. Check if server.py is running.");
       } finally {
-      state.isProcessing = false;
-      const btn2 = document.getElementById('ai-extract-btn');
-      if (btn2) {
-        btn2.innerHTML = '<i class="bi bi-stars me-1"></i> AI Extract';
-        btn2.disabled = false;
+        state.isProcessing = false;
+        if (poller) clearInterval(poller);
+        if (btn) {
+          btn.innerHTML = '<i class="bi bi-stars me-1"></i> AI Extract';
+          btn.disabled = false;
+        }
       }
-    }
-  };
+    };;
 
 
       window.handleMainUpload = (e) => {
       const file = e.target.files[0];
       if (file?.type === 'application/pdf') {
-      state.fileData = { 
-        name: file.name, 
+      state.fileData = {
+        name: file.name,
         url: URL.createObjectURL(file),
         file: file          // <--- 关键：保存原始 File 对象
         };
