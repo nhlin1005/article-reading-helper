@@ -8,24 +8,13 @@
        用 AI 自动选词（不需要手工 select 词表）
   2) --mode list
        用你自己准备好的 select 词表（和之前一样）
-
-用法示例：
-
-  # 1. AI 模式（推荐）
-  python pipeline_from_pdf.py \
-      --mode ai \
-      --pdf "data/Xuanzang-page 1-5.pdf" \
-      --ai_top_n 30
-
-  # 2. 手工列表模式
-  python pipeline_from_pdf.py \
-      --mode list \
-      --pdf "data/Xuanzang-page 1-5.pdf" \
-      --select 20241226.txt
 """
 
 import argparse
+import json
+import math
 from pathlib import Path
+from collections import Counter
 
 from extract_pdf_text import extract_text_from_pdf
 from build_vocab_combined import build_vocab
@@ -35,24 +24,48 @@ from config import DEFAULT_TOP_N
 
 
 def _make_reading_folder(pdf_path: Path):
-    """
-    根据 PDF 文件生成：
-      - safe_stem: 去掉空格等的安全文件名
-      - reading_dir: reading_{safe_stem} 文件夹路径
-      - article_txt_path: 文章 txt 路径（放在 reading_dir 里）
-    """
-    pdf_stem = pdf_path.stem  # 原始文件名（不含后缀），如 "Xuanzang-page 1-5"
-
-    # 把空格等转成下划线，避免路径太怪
-    safe_stem = "".join(
-        c if (c.isalnum() or c in "-_") else "_" for c in pdf_stem
-    )
+    pdf_stem = pdf_path.stem
+    safe_stem = "".join(c if (c.isalnum() or c in "-_") else "_" for c in pdf_stem)
 
     reading_dir = Path(f"reading_{safe_stem}")
     reading_dir.mkdir(parents=True, exist_ok=True)
 
     article_txt_path = reading_dir / f"{safe_stem}.txt"
     return reading_dir, safe_stem, article_txt_path
+
+
+def _normalize_for_freq(s: str) -> str:
+    return (s or "").strip().lower()
+
+
+def _make_score_json(article_text: str, words: list[str]) -> dict:
+    """
+    生成一个“可解释的 difficulty score”：
+    - 词频越低越难（log 缩放）
+    - 词越长略微越难
+    输出范围大致在 [0, 1]，你后续也可以替换成模型置信度。
+    """
+    toks = [_normalize_for_freq(w) for w in article_text.split()]
+    freq = Counter(toks)
+
+    # 为了更稳：如果 split 太粗糙导致频率全是 0，也不会崩
+    max_f = 1
+    for w in words:
+        max_f = max(max_f, freq.get(_normalize_for_freq(w), 1))
+
+    scores = {}
+    for w in words:
+        ww = _normalize_for_freq(w)
+        f = max(1, freq.get(ww, 1))
+        # rare_score: 越少见越接近 1
+        rare_score = 1.0 - (math.log(f + 1.0) / math.log(max_f + 1.0))
+        # len_score: 越长越接近 1
+        len_score = min(1.0, len(ww) / 12.0)
+        # 合成（你可调权重）
+        s = 0.65 * rare_score + 0.35 * len_score
+        scores[w] = round(float(s), 3)
+
+    return scores
 
 
 def run_ai_mode(pdf_path: Path,
@@ -80,13 +93,23 @@ def run_ai_mode(pdf_path: Path,
     select_path.write_text("\n".join(words) + "\n", encoding="utf-8")
     print(f"  ✓ AI 选词表已保存：{select_path} （共 {len(words)} 个词）")
 
+    # 2.5) [新增] 生成 difficulty score JSON（供 build_vocab_combined 使用）
+    score_json_path = reading_dir / f"{safe_stem}.selected_words.json"
+    scores = _make_score_json(text, words)
+    score_json_path.write_text(json.dumps(scores, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  ✓ difficulty score JSON 已保存：{score_json_path}")
+
     # 3) build_vocab：文章 txt + AI 词表 -> words.txt + csv
     out_words = reading_dir / f"{safe_stem}.ai.words.txt"
     out_csv = reading_dir / f"{safe_stem}.ai.csv"
 
     print(f"\n[Step 3] 构建词汇表 CSV（查释义 + 例句）...")
-    # ⚠️ 这里改成位置参数，和 build_vocab_combined.py 里的签名一致
-    build_vocab(str(article_txt), str(select_path), str(out_words), str(out_csv))
+    # ✅ 兼容新旧 build_vocab 签名：新版带 score_json_path，第五个参数
+    try:
+        build_vocab(str(article_txt), str(select_path), str(out_words), str(out_csv), str(score_json_path))
+    except TypeError:
+        build_vocab(str(article_txt), str(select_path), str(out_words), str(out_csv))
+
     print(f"  ✓ 文章中出现的目标词列表：{out_words}")
     print(f"  ✓ 词汇 CSV：{out_csv}")
 
@@ -124,8 +147,12 @@ def run_list_mode(pdf_path: Path,
     out_csv = reading_dir / f"{safe_stem}.list.csv"
 
     print(f"\n[Step 2] 使用你提供的词表构建 CSV...")
-    # ⚠️ 同样改成位置参数
-    build_vocab(str(article_txt), str(select_path), str(out_words), str(out_csv))
+    # list 模式没有 score_json，就传空 or 不传（兼容）
+    try:
+        build_vocab(str(article_txt), str(select_path), str(out_words), str(out_csv), "")
+    except TypeError:
+        build_vocab(str(article_txt), str(select_path), str(out_words), str(out_csv))
+
     print(f"  ✓ 文章中出现的目标词列表：{out_words}")
     print(f"  ✓ 词汇 CSV：{out_csv}")
 
