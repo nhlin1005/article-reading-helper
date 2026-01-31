@@ -10,9 +10,18 @@ ai_select_wordlist.py
 - 尽量排除 four / lake / river / little 这类太简单的高频词
 - 尽量排除 shwo-yih-tsai-yu-po / sarvistivadas 这类音译怪词
 - 支持 top_n 为“数量”（>=1）或“比例”（0~1）
+
+新增（Hackathon/工程化增强）：
+- 保留原函数 ai_select_words_for_article() -> List[str]
+- 新增 ai_select_words_for_article_with_scores() -> List[dict]
+  输出每个词的 difficulty score（0~1，rank-based，可解释）
+- 新增 export_selected_words_json()，将结果写到 JSON 文件中
 """
 
-from typing import List, Dict, Set
+from __future__ import annotations
+
+from typing import List, Dict, Set, Any
+import json
 
 from config import DEFAULT_TOP_N, MAX_CANDIDATES_BEFORE_LLM, MIN_TOKEN_LEN
 from text_utils import get_word_freqs, tokenize_text_to_words
@@ -119,16 +128,45 @@ def _decide_n_to_select(total: int, top_n: float | int | None) -> int:
     return n
 
 
-def ai_select_words_for_article(text: str,
-                                top_n: float | int = DEFAULT_TOP_N) -> List[str]:
+def _build_rank_scores(ordered_tokens: List[str], model_keyword_words: Set[str],
+                       bonus: float = 0.10) -> Dict[str, float]:
     """
-    主函数：给一整篇英文文章，返回 top_n 个“可能是生词”的单词（小写形式）。
-
-    top_n:
-      - >=1: 视为“要几个词”（例如 30）
-      - 0~1: 视为“比例”（例如 0.1 = 10%）
+    将排序后的候选词列表转成 0~1 的 difficulty_score：
+    - rank-based：越靠前越接近 1.0，越靠后越接近 0.0
+    - 对模型关键词拆出来的词加一点 bonus（上限 1.0）
     """
+    scores: Dict[str, float] = {}
+    total = len(ordered_tokens)
+    if total <= 0:
+        return scores
 
+    if total == 1:
+        tok = ordered_tokens[0]
+        s = 1.0 + (bonus if tok in model_keyword_words else 0.0)
+        scores[tok] = round(min(1.0, s), 4)
+        return scores
+
+    denom = float(total - 1)
+    for idx, tok in enumerate(ordered_tokens):
+        # idx=0 => 1.0, idx=last => 0.0
+        s = 1.0 - (idx / denom)
+        if tok in model_keyword_words:
+            s = min(1.0, s + bonus)
+        scores[tok] = round(s, 4)
+
+    return scores
+
+
+def _core_select(text: str, top_n: float | int = DEFAULT_TOP_N) -> Dict[str, Any]:
+    """
+    内部核心逻辑：保持你原有流程不变，但把中间产物也返回出来：
+    - ordered: 排序后的候选池
+    - refined: LLM 精修后的列表
+    - out_words: 最终输出词（去重、过滤后）
+    - rank_score: 每个 token 的 difficulty_score（0~1）
+    - model_keyword_words: 模型关键词拆词集合
+    - freq: 词频
+    """
     # 1) 词频统计
     freq: Dict[str, int] = get_word_freqs(text)
 
@@ -193,19 +231,21 @@ def ai_select_words_for_article(text: str,
         candidates.add(kw)
 
     if not candidates:
-        return []
+        return {
+            "ordered": [],
+            "refined": [],
+            "out_words": [],
+            "rank_score": {},
+            "model_keyword_words": model_keyword_words,
+            "freq": freq,
+        }
 
     # 兜底：freq 里没有的，给个 1
     for w in list(candidates):
         if w not in freq:
             freq[w] = 1
 
-    # 5) 排序打分：
-    #   1. weird token 尽量放最后
-    #   2. 词频越低越靠前
-    #   3. 模型关键词稍微加分
-    #   4. 词越长越靠前
-    #   5. 字母序兜底
+    # 5) 排序打分（完全保留你原来的排序逻辑）
     def score(token: str):
         weird = 1 if _is_weird_token(token) else 0
         token_freq = freq.get(token, 10**9)
@@ -220,6 +260,9 @@ def ai_select_words_for_article(text: str,
 
     ordered = sorted(candidates, key=score)
 
+    # [新增] 生成 rank-based difficulty_score（0~1）
+    rank_score = _build_rank_scores(ordered, model_keyword_words, bonus=0.10)
+
     # 6) 根据“数量 or 比例”决定最终要几个
     total = len(ordered)
     n_select = _decide_n_to_select(total, top_n)
@@ -227,8 +270,8 @@ def ai_select_words_for_article(text: str,
     # 7) （可选）LLM 精修
     refined = refine_keywords_with_llm(text, ordered, top_n=n_select)
 
-    # 8) 最终截断 + 再过滤一层
-    out: List[str] = []
+    # 8) 最终截断 + 再过滤一层（保持你原来的过滤规则）
+    out_words: List[str] = []
     seen = set()
 
     for w in refined:
@@ -243,11 +286,59 @@ def ai_select_words_for_article(text: str,
             continue
         if tok not in seen:
             seen.add(tok)
-            out.append(tok)
-        if len(out) >= n_select:
+            out_words.append(tok)
+        if len(out_words) >= n_select:
             break
 
+    return {
+        "ordered": ordered,
+        "refined": refined,
+        "out_words": out_words,
+        "rank_score": rank_score,
+        "model_keyword_words": model_keyword_words,
+        "freq": freq,
+    }
+
+
+def ai_select_words_for_article(text: str, top_n: float | int = DEFAULT_TOP_N) -> List[str]:
+    """
+    原接口不变：返回 top_n 个“可能是生词”的单词（小写形式）。
+    """
+    result = _core_select(text, top_n=top_n)
+    return result["out_words"]
+
+
+def ai_select_words_for_article_with_scores(text: str, top_n: float | int = DEFAULT_TOP_N) -> List[dict]:
+    """
+    新接口：返回带 difficulty_score 的结果。
+    score 范围 0~1，rank-based（越靠前越接近 1），并对模型关键词词稍加 bonus。
+    """
+    result = _core_select(text, top_n=top_n)
+    out_words: List[str] = result["out_words"]
+    rank_score: Dict[str, float] = result["rank_score"]
+
+    out: List[dict] = []
+    for w in out_words:
+        out.append({
+            "word": w,
+            "score": float(rank_score.get(w, 0.0)),
+        })
     return out
+
+
+def export_selected_words_json(text: str, out_path: str, top_n: float | int = DEFAULT_TOP_N) -> str:
+    """
+    将 ai_select_words_for_article_with_scores 的输出写成 JSON 文件：
+    [
+      {"word": "...", "score": 0.83},
+      ...
+    ]
+    返回 out_path，方便上层调用。
+    """
+    data = ai_select_words_for_article_with_scores(text, top_n=top_n)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return out_path
 
 
 if __name__ == "__main__":
@@ -257,6 +348,11 @@ if __name__ == "__main__":
         "He had a long moustache and very strict regulations to follow."
     )
     words_abs = ai_select_words_for_article(demo_text, top_n=10)
+    words_abs_scored = ai_select_words_for_article_with_scores(demo_text, top_n=10)
     words_ratio = ai_select_words_for_article(demo_text, top_n=0.5)
+    words_ratio_scored = ai_select_words_for_article_with_scores(demo_text, top_n=0.5)
+
     print("Selected (top_n=10):", words_abs)
+    print("Selected w/ scores (top_n=10):", words_abs_scored)
     print("Selected (top_n=0.5):", words_ratio)
+    print("Selected w/ scores (top_n=0.5):", words_ratio_scored)
