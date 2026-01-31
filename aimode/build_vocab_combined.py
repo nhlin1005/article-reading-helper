@@ -39,16 +39,24 @@ import requests
 from lxml import html
 from urllib.parse import quote
 
-
 import functools
+
 print = functools.partial(print, flush=True)
+
+# ----------------------------
+# Optional AI meaning/example fallback (LLM)
+# ----------------------------
+try:
+    from llm_refiner import generate_meaning_example_with_context
+except Exception:
+    generate_meaning_example_with_context = None
 
 # ----------------------------
 # Live progress for front-end polling
 # ----------------------------
 # NOTE: server.py imports this module and exposes PROGRESS at /api/progress.
 PROGRESS = {
-    "status": "idle",   # idle | running | done
+    "status": "idle",  # idle | running | done
     "current": 0,
     "total": 0,
     "word": "",
@@ -67,6 +75,7 @@ def _set_progress(*, status: str = None, current: int = None, total: int = None,
             PROGRESS["word"] = word
     except Exception:
         pass
+
 
 # ----------------------------
 # 1) Tokenization / normalization
@@ -195,20 +204,20 @@ def cambridge_example(word: str) -> Optional[str]:
                         text = re.sub(r"<.*?>", "", text, flags=re.S)
                         text = re.sub(r"\s+", " ", text).strip()
                         if (
-                            len(text) > 20
-                            and len(text.split()) >= 4
-                            and not any(
-                                skip in text.lower()
-                                for skip in [
-                                    "more examples",
-                                    "fewer examples",
-                                    "smart vocabulary",
-                                    "thesaurus",
-                                    "see also",
-                                    "compare",
-                                    "related to",
-                                ]
-                            )
+                                len(text) > 20
+                                and len(text.split()) >= 4
+                                and not any(
+                            skip in text.lower()
+                            for skip in [
+                                "more examples",
+                                "fewer examples",
+                                "smart vocabulary",
+                                "thesaurus",
+                                "see also",
+                                "compare",
+                                "related to",
+                            ]
+                        )
                         ):
                             print(f"  ✓ Example: {text[:80]}...")
                             return text
@@ -244,6 +253,98 @@ def find_sentence_as_example(article_text: str, word: str, max_len: int = 200) -
     if len(sent) > max_len:
         return sent[: max_len - 3].rstrip() + "..."
     return sent
+
+
+def get_surrounding_context(article_text: str, word: str, window: int = 2, max_chars: int = 900) -> str:
+    """Return a short context snippet around the first occurrence of word.
+
+    We split the article into sentences and return `window` sentences before and after.
+    Used for AI fallback meaning/example when dictionaries fail.
+    """
+    if not article_text or not word:
+        return ""
+
+    cleaned = re.sub(r"\s+", " ", article_text).strip()
+    if not cleaned:
+        return ""
+
+    sents = re.split(r"(?<=[.!?])\s+", cleaned)
+    if not sents:
+        return cleaned[:max_chars]
+
+    wpat = re.compile(r"\b" + re.escape(word) + r"\b", flags=re.IGNORECASE)
+
+    hit = -1
+    for i, s in enumerate(sents):
+        if wpat.search(s):
+            hit = i
+            break
+
+    if hit < 0:
+        return cleaned[:max_chars]
+
+    start_i = max(0, hit - window)
+    end_i = min(len(sents), hit + window + 1)
+    snippet = " ".join(sents[start_i:end_i]).strip()
+
+    if len(snippet) > max_chars:
+        snippet = snippet[: max_chars - 3].rstrip() + "..."
+
+
+# ----------------------------
+# 5b) "AI meaning" fallback without external API (heuristic)
+# ----------------------------
+def heuristic_ai_meaning(word: str, context: str, example: str = "") -> str:
+    """Create a short, context-aware meaning when dictionaries/LLM fail.
+
+    This is a lightweight fallback that tries to be useful even without an API key.
+    It uses word morphology (hyphen patterns) + capitalization cues in context.
+
+    Returns a single-sentence English meaning.
+    """
+    w = (word or "").strip()
+    if not w:
+        return ""
+
+    ctx = (context or "").strip()
+
+    # Detect if the word appears capitalized in context -> likely proper noun
+    cap_match = None
+    if ctx:
+        m = re.search(r"\b([A-Z][A-Za-z\-']*)\b", ctx)
+        # Find the exact matched token for this word (case-insensitive)
+        m2 = re.search(r"\b([A-Za-z][A-Za-z\-']*)\b", ctx)
+        # Better: locate the token corresponding to the word
+        m3 = re.search(r"\b(" + re.escape(w) + r")\b", ctx, flags=re.IGNORECASE)
+        if m3:
+            cap_match = m3.group(0)
+            if any(c.isupper() for c in cap_match):
+                return f"A proper noun/name mentioned in the article; in this context it refers to '{cap_match}'."
+
+    wl = w.lower()
+
+    # Hyphen morphology
+    if "-" in wl:
+        parts = [p for p in re.split(r"-+", wl) if p]
+        if wl.endswith("-based") and len(parts) >= 2:
+            base = " ".join(parts[:-1])
+            return f"Based in or organized around {base}; used here to describe something grounded in the local community or group."
+        if wl.endswith("-speaking") and len(parts) >= 2:
+            lang = " ".join(parts[:-1])
+            return f"Able to speak {lang}; used here to describe a person or group whose primary language is {lang}."
+        if wl.endswith("-lessons") and len(parts) >= 2:
+            first = " ".join(parts[:-1])
+            return f"Lessons given in a {first} setting; in this context, lessons taught at home rather than at a school."
+        # generic hyphenated adjective
+        if len(parts) == 2:
+            return f"An adjective meaning '{parts[0]}' + '{parts[1]}', describing something characterized by both parts in this context."
+        return "A compound/hyphenated term used as a descriptive modifier in this context."
+
+    # If we have an example, we can build a softer definition around it
+    if example:
+        return f"A term used in the article; its meaning is best inferred from the example sentence (it may be a specialized term or name)."
+
+    return "A term used in the article; it may be a specialized term or proper noun not covered by standard dictionaries."
 
 
 # ----------------------------
@@ -312,8 +413,10 @@ def build_vocab(article_path: str, select_path: str,
 
     rows = []
     for i, w in enumerate(ordered, 1):
-        _set_progress(status="running", current=i-1, total=len(ordered), word=w)
+        _set_progress(status="running", current=i - 1, total=len(ordered), word=w)
         print(f"\n[{i}/{len(ordered)}] Processing '{w}'...")
+
+        ai = None
 
         # 1) Merriam-Webster 释义（带英式→美式 fallback）
         meaning = webster_meaning(w)
@@ -322,11 +425,38 @@ def build_vocab(article_path: str, select_path: str,
         else:
             print(f"  ✗ No meaning found for '{w}'")
 
+        # ✅ When dictionary meaning is missing, try AI meaning using surrounding context.
+        if not meaning:
+            ctx = get_surrounding_context(article_text, w, window=2, max_chars=900)
+
+            # 1) LLM-based meaning (requires OPENAI_API_KEY + USE_LLM_REFINER)
+            if callable(generate_meaning_example_with_context):
+                ai = generate_meaning_example_with_context(w, ctx)
+
+            if ai and (ai.get("meaning") or "").strip():
+                meaning = (ai.get("meaning") or "").strip()
+                print(f"  ✓ AI meaning: {meaning[:80]}...")
+            else:
+                ai = None
+                # 2) Heuristic "AI meaning" fallback (no external API)
+                h = heuristic_ai_meaning(w, ctx, "")
+                if h:
+                    meaning = h
+                    print(f"  ✓ AI meaning (heuristic): {meaning[:80]}...")
+                else:
+                    print(f"  ✗ AI meaning not available for '{w}'")
+
         # 对同一个词，查一次就够，别太快
         time.sleep(0.4)
 
         # 2) Cambridge 例句，如果没有再从原文里找句子
         example = cambridge_example(w)
+
+        # ✅ If Cambridge fails, use AI example (only if AI was triggered)
+        if not example and ai and (ai.get("example") or "").strip():
+            example = (ai.get("example") or "").strip()
+            print(f"  ✓ AI example: {example[:80]}...")
+
         if not example:
             fallback = find_sentence_as_example(article_text, w)
             if fallback:
