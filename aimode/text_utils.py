@@ -42,7 +42,6 @@ def tokenize_text_to_words(text: str) -> List[str]:
     return out
 
 
-def get_word_freqs(text: str) -> Counter:
+def get_word_freqs(toks: List[str]) -> Counter:
     """统计文本里单词频率。"""
-    toks = tokenize_text_to_words(text)
     return Counter(toks)

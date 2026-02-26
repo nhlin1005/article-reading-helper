@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 rule-based 候选词生成：
@@ -34,7 +35,7 @@ COMMON_WORDS = {
 }
 
 
-def build_candidates(text: str,
+def build_candidates(tokens: List[str], freqs: Counter,
                      max_candidates: int = MAX_CANDIDATES_BEFORE_LLM) -> List[str]:
     """
     从整篇文章里找出「可能是生词」的候选列表（不考虑顺序和难度，只要 recall 高）：
@@ -42,8 +43,6 @@ def build_candidates(text: str,
       - 长度 >= MIN_TOKEN_LEN
       - 保留重复出现次数较多的词
     """
-    tokens = tokenize_text_to_words(text)
-    freqs: Counter = get_word_freqs(text)
 
     seen = set()
     candidates: List[str] = []

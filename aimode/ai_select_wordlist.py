@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 ai_select_wordlist.py
@@ -168,11 +169,12 @@ def _core_select(text: str, top_n: float | int = DEFAULT_TOP_N) -> Dict[str, Any
     - freq: 词频
     """
     # 1) 词频统计
-    freq: Dict[str, int] = get_word_freqs(text)
+    tokens = tokenize_text_to_words(text)
+    freq: Dict[str, int] = get_word_freqs(tokens)
 
     # 2) 规则候选
     rule_candidates: List[str] = build_candidates(
-        text,
+        tokens, freq,
         max_candidates=MAX_CANDIDATES_BEFORE_LLM,
     )
 
